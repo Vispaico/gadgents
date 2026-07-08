@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Factory local config (per user provision)
+.factory/
+
+# Node / frontend build
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+
+# DB / runtime
+*.db
+*.sqlite3
+data/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

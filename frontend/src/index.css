@@ -1,0 +1,66 @@
+:root {
+  --bg: #0f1115;
+  --panel: #1a1d24;
+  --panel2: #222633;
+  --text: #e6e8ee;
+  --muted: #9aa3b2;
+  --accent: #6c8cff;
+  --accent2: #4f6fe0;
+  --error: #ff6b6b;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+input, textarea, button {
+  font: inherit;
+  background: var(--panel2);
+  color: var(--text);
+  border: 1px solid #2c3140;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+button { cursor: pointer; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button:not(.link):not(.chip) { background: var(--accent); border-color: var(--accent2); font-weight: 600; }
+button.link { background: transparent; border: none; color: var(--accent); padding: 4px; }
+.card {
+  background: var(--panel);
+  border: 1px solid #2c3140;
+  border-radius: 12px;
+  padding: 16px;
+  gap: 8px;
+}
+.card.click { cursor: pointer; }
+.card.click:hover { border-color: var(--accent); }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+.muted { color: var(--muted); font-size: 14px; }
+.error { color: var(--error); background: #2a1414; border: 1px solid #4a1f1f; padding: 8px 10px; border-radius: 8px; }
+.app { max-width: 960px; margin: 0 auto; padding: 16px; }
+header {
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 0; border-bottom: 1px solid #2c3140; margin-bottom: 18px;
+}
+header nav { margin-left: auto; display: flex; gap: 8px; }
+header button.active { outline: 2px solid var(--accent); }
+.chat { display: flex; flex-direction: column; gap: 12px; }
+.messages { display: flex; flex-direction: column; gap: 10px; min-height: 200px; }
+.msg { padding: 10px 12px; border-radius: 10px; max-width: 80%; white-space: pre-wrap; }
+.msg.user { align-self: flex-end; background: var(--accent2); }
+.msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid #2c3140; }
+.composer { display: flex; gap: 8px; }
+.composer textarea { flex: 1; min-height: 48px; resize: vertical; }
+.studio { display: flex; flex-direction: column; gap: 12px; }
+textarea.big { min-height: 160px; resize: vertical; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { border-radius: 999px; padding: 6px 14px; }
+.chip.active { background: var(--accent); border-color: var(--accent2); }
+.result pre {
+  white-space: pre-wrap; background: var(--panel); border: 1px solid #2c3140;
+  border-radius: 10px; padding: 12px; max-height: 400px; overflow: auto;
+}
+main { min-height: 60vh; }
+h1, h2, h3 { margin: 0 0 4px; }
