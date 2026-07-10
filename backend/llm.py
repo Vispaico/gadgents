@@ -33,7 +33,7 @@ class CompletionResult:
 
 # Reasonable per-provider default models.
 DEFAULT_MODELS: dict[ProviderName, str] = {
-    "openai": "gpt-4.1-mini",
+    "openai": "gpt-5.6-luna",
     "groq": "llama-3.3-70b-versatile",
     "openrouter": "openai/gpt-4.1-mini",
     "ollama": "qwen3.5:latest",
@@ -42,7 +42,7 @@ DEFAULT_MODELS: dict[ProviderName, str] = {
 BASE_URLS = {
     "openai": "https://api.openai.com/v1",
     "groq": "https://api.groq.com/openai/v1",
-    "openrouter": "https://api.openrouter.ai/api/v1",
+    "openrouter": "https://openrouter.ai/api/v1",
     # ollama base url comes from env
 }
 
@@ -132,3 +132,47 @@ class LLMClient:
 
     def close(self) -> None:
         self._client.close()
+
+    def complete_targeted(
+        self,
+        provider: "ProviderName",
+        model: str,
+        messages: list[OpenAIChatMessage],
+        temperature: float = 0.7,
+        max_tokens: int = 2048,
+    ) -> CompletionResult:
+        """Complete on one specific provider + model (used by the fusion router)."""
+        if provider not in self._order:
+            raise RuntimeError(f"Provider not configured: {provider}")
+        if not self._is_healthy(provider):
+            raise RuntimeError(f"Provider unhealthy (cooldown): {provider}")
+        base_url = self._base_url(provider)
+        api_key = self._api_key(provider)
+        if base_url is None or (provider != "ollama" and not api_key):
+            raise RuntimeError(f"Provider unavailable (no base_url/key): {provider}")
+        try:
+            resp = self._client.post(
+                f"{base_url.rstrip('/')}/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            choice = data["choices"][0]["message"]["content"]
+            usage = data.get("usage", {})
+            self._health[provider].failures = 0
+            return CompletionResult(
+                text=choice,
+                provider=provider,
+                model=model,
+                tokens_in=usage.get("prompt_tokens", 0),
+                tokens_out=usage.get("completion_tokens", 0),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._mark_failure(provider)
+            raise RuntimeError(f"{provider}/{model} failed: {exc}") from exc
