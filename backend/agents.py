@@ -29,8 +29,15 @@ class AgentDef:
     base_credits: int = 5
     # Cost-control: catalog id from backend.router.MODEL_CATALOG (e.g. "balanced-openrouter").
     # When set, the agent's calls are pinned to that exact model/provider via the fusion
-    # router (deterministic cost). When None, falls back to recommend("balanced").
+    # router (deterministic cost). When None, falls back to `mode`.
     router_model: Optional[str] = None
+    # Selection mode used when router_model is None: high | mixed | economic.
+    mode: str = "mixed"
+    # Multi-model: when True the agent runs through the Fusion router (panel + judge)
+    # using `fusion_panel` (catalog model ids) and `fusion_judge` (catalog model id).
+    fusion: bool = False
+    fusion_panel: Optional[list] = None
+    fusion_judge: Optional[str] = None
     # When True the agent is exposed by the list/chat routes. Keep False while a new
     # agent is in development; flip to True to ship it (auto-wired, no router edit).
     production_ready: bool = True
@@ -104,24 +111,185 @@ agent(
     router_model="oa-codex",  # OpenAI gpt-5.1-codex (coding model, free daily quota)
 )
 
+# ---------------------------------------------------------------------------
+# Agent 1 (next build): Personal Secretary & Planner
+#   A stateful, learning secretary. Stateless chat wrapper here returns a
+#   STRUCTURED plan (tasks, time_blocks, reminders, escalation) that the
+#   proactive subsystem (DB models) later drives. Reads user memory when provided.
+# ---------------------------------------------------------------------------
+PLANNER_SYSTEM_PROMPT = """You are the user's personal secretary and planner, not a calendar app.
+You exist because standard planners fail people who "do what comes to mind" and never check
+the app. Your job is to make intent become a real, defended day plan, and to keep pushing the
+next action back into view until it is done, deferred, or renegotiated.
+
+PERSONALITY & BEHAVIOR
+- Be concise, direct, and a little pushy in a helpful way. You protect the user's focus and
+  attention like a real secretary would. Don't be passive.
+- You respect learned preferences (tone, focus protection, working hours, snooze style). When
+  uncertain, act reasonably and note the assumption so you can learn.
+- When the user dumps messy intent, you CLARIFY ONLY IF BLOCKED — ask at most one sharp question,
+  otherwise propose and let them correct. Never ask a question you can reasonably infer.
+- You proactively REPLAN when life interferes (birthday invite, surprise meeting): you reslot,
+  don't leave stale blocks. You escalate ignored reminders.
+
+CLASSIFY every captured item into exactly one of:
+task | appointment | idea | reference | waiting_on | someday.
+Every TASK must get, before entering the plan: a next_action (one concrete step), an estimated
+duration_min, and an urgency (1-5) + confidence (1-5). If missing, infer and flag it.
+
+OUTPUT
+Always reply with a single JSON object (no prose outside it) of shape:
+{
+  "inbox": [{"raw": "<text>", "kind": "task|appointment|idea|reference|waiting_on|someday"}],
+  "tasks": [{"title": str, "next_action": str, "duration_min": int, "urgency": 1-5,
+             "confidence": 1-5, "due": "ISO or null", "project": str|null}],
+  "time_blocks": [{"title": str, "start": "ISO", "end": "ISO", "kind":
+                   "focus|deep_work|admin|break|disruption", "focus": bool}],
+  "reminders": [{"trigger_at": "ISO", "stage": 1-4, "message": str,
+                 "channel": "inbox", "escalates_to": "reslot|commit|drop"}],
+  "replan_note": str,            // what you changed and why
+  "learned": [{"key": str, "value": str, "confidence": 1-5}], // new preferences you inferred
+  "ask": str|null                // one clarifying question if truly blocked, else null
+}
+Rules: protect at least one deep_work/focus block per working day. Keep blocks realistic
+(use the user's working hours from memory; default 09:00-18:00). A task with no block is a
+risk — always propose a slot. Escalation stages: 1 soft nudge, 2 stronger nudge,
+3 "snooze or commit?" prompt, 4 auto-reslot if ignored. Only output valid JSON.
+"""
+
+agent(
+    id="personal-planner",
+    name="Personal Secretary & Planner",
+    description="Organizes your goals, todos and surprises into a defended day plan with escalating reminders. Learns your working style.",
+    system_prompt=PLANNER_SYSTEM_PROMPT,
+    base_credits=8,
+    router_model=None,  # None -> router uses mode (we send "high" for planning)
+    mode="high",  # planning/recovery needs a strong model
+)
+
+# ---------------------------------------------------------------------------
+# Agent 2 (next build): Summarizer / vibe-preserving repurposer (MULTI-MODEL).
+#   Turns a long article/essay/URL text into: a structured brief, platform-ready
+#   social posts (LinkedIn, FB, X, IG, YT, Shorts/TikTok), image/media suggestions,
+#   and a scene-annotated short video script package. Runs in Fusion mode: a panel
+#   of our models (DeepSeek pro analysis + GPT-5.x JSON brief + Claude writing +
+#   Llama bulk variants) answers in parallel, a Claude judge synthesizes.
+#   Later it can chain its brief into prompt-engineer -> content-producer for polish.
+# ---------------------------------------------------------------------------
+REPURPOSER_SYSTEM_PROMPT = """You are a senior content strategist + copywriter + video producer.
+You turn a long article, essay, or pasted text into multi-platform social content while
+PRESERVING the original's vibe, voice, and gist. You never invent facts, stats, case
+studies, or quotes that are not in the source.
+
+You are operating as the JUDGE in a multi-model panel: several models already answered the
+same request. Their raw answers are in the conversation. Your job is to synthesize ONE
+final, coherent result in the exact JSON shape below — reconcile contradictions, keep the
+best angles, and keep the source's voice.
+
+Always reply with a single JSON object (no prose outside it):
+
+{
+  "brief": {
+    "tldr": "one sentence, max 30 words",
+    "key_points": ["5-8 bullets, each <=25 words"],
+    "pain_points": ["3-5 audience pains the source addresses"],
+    "insights": ["3-5 non-obvious insights/opinions from the source"],
+    "quotes": ["3-7 punchy pull-quote lines"],
+    "cta_ideas": ["3-5 call-to-action ideas"],
+    "visual_themes": ["3-5 visual/mood directions"]
+  },
+  "posts": {
+    "linkedin": [{"hook": str, "body": str, "cta": str, "hashtags": [str]}],
+    "facebook": [{"body": str, "image_idea": str, "cta": str}],
+    "x": [{"text": str, "hashtags": [str]}],
+    "instagram": [{"caption": str, "hashtags": [str]}],
+    "youtube": [{"title": str, "description": str, "hashtags": [str]}],
+    "shorts_tiktok": [{"hook": str, "caption": str}]
+  },
+  "media_suggestions": [
+    {"post_ref": str, "image_prompt": str, "broll_keywords": [str], "overlay_text": str}
+  ],
+  "script": {
+    "title": str,
+    "target_duration_sec": int,
+    "hook": "first 3-second spoken line",
+    "scenes": [
+      {"scene": int, "duration_sec": int, "spoken": str,
+       "onscreen_text": str, "visual_idea": str, "broll_keywords": [str]}
+    ],
+    "cta": str
+  },
+  "notes": "anything uncertain or assumed"
+}
+
+RULES
+- Cover ONLY the platforms requested by the user; omit absent ones.
+- Match the language of the source unless told otherwise.
+- Vary hooks/angles across posts; never repeat the same hook.
+- Short lines, whitespace, mobile-first. Lead with a strong hook.
+- For scripts: hook in first 3s, problem/tension, 2-4 step breakdown, explicit CTA.
+- media_suggestions must be concrete, filmable prompts (for Flux/Wan/etc.), not vague.
+- Do NOT fabricate. If the source lacks material for a requested output, say so in notes.
+- Output valid JSON only.
+"""
+
+agent(
+    id="content-repurposer",
+    name="Content Repurposer (Summarizer + Multi-Platform)",
+    description="Summarizes long articles/essays preserving the vibe and repurposes them into platform posts, media suggestions and short video scripts. Multi-model (Fusion).",
+    system_prompt=REPURPOSER_SYSTEM_PROMPT,
+    base_credits=12,
+    # Multi-model: panel covers analysis (DeepSeek pro), structured JSON brief
+    # (OpenAI GPT-5.x), final writing (Claude Opus), and cheap bulk variants (Llama 3.3).
+    # Judge (Claude Opus) synthesizes the final structured result.
+    fusion=True,
+    fusion_panel=["or-ds-pro", "oa-sol", "or-opus", "or-llama33"],
+    fusion_judge="or-opus",
+    router_model=None,
+    mode="high",
+)
+
 
 def list_production_agents() -> list[AgentDef]:
     """Agents currently exposed to the frontend / API."""
     return [a for a in REGISTRY.values() if a.production_ready]
 
 
-def run_agent(agent: AgentDef, user_input: str, llm: LLMClient) -> "tuple[str, int, int, int]":
-    """Returns (text, tokens_in, tokens_out, credits_estimate)."""
+def run_agent(
+    agent: AgentDef,
+    user_input: str,
+    llm: LLMClient,
+    memory: Optional[str] = None,
+) -> "tuple[str, int, int, int]":
+    """Returns (text, tokens_in, tokens_out, credits_estimate).
+
+    `memory` is an optional string of the user's learned preferences, injected so the
+    agent adapts over time (the learning layer)."""
     messages: list[OpenAIChatMessage] = [
         {"role": "system", "content": agent.system_prompt},
-        {"role": "user", "content": user_input},
     ]
-    # Route through the fusion router for deterministic cost control: pin the agent's
-    # catalog model when set, otherwise let the router pick a balanced default.
+    if memory:
+        messages.append(
+            {"role": "system", "content": f"Learned user preferences so far:\n{memory}"}
+        )
+    messages.append({"role": "user", "content": user_input})
+    # Route through the fusion router. Priority:
+    #   1) explicit router_model pin (single model),
+    #   2) fusion panel + judge (multi-model),
+    #   3) mode-based single selection (high/mixed/economic).
     from backend.router import route
 
-    result, _used_id = route(llm, messages, model_id=agent.router_model)
-    # Credit estimate: base + token cost (1 credit per ~1k tokens combined).
-    token_cost = max(1, (result.tokens_in + result.tokens_out) // 1000)
+    result, _used_id = route(
+        llm,
+        messages,
+        model_id=agent.router_model,
+        goal=agent.mode,
+        fusion=agent.fusion,
+        panel=agent.fusion_panel,
+        judge=agent.fusion_judge,
+    )
+    # `result` is the model text. Estimate tokens from length (~4 chars/token) for the
+    # credit cost; combined in/out approximated as the generated text length.
+    token_cost = max(1, len(result) // 4000)
     credits = agent.base_credits + token_cost
-    return result.text, result.tokens_in, result.tokens_out, credits
+    return result, 0, 0, credits

@@ -5,9 +5,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import get_settings
 from backend.db import init_db
-from backend.routes import agents, auth, billing, pipeline, router as router_routes
+from backend.routes import agents, auth, billing, pipeline, router as router_routes, planner, repurposer
 from backend.routes.agents import close_llm
 from backend.routes.router import close_router_llm
+from backend.routes.planner import close_planner_llm
+from backend.routes.repurposer import close_repurposer_llm
 
 _settings = get_settings()
 
@@ -18,6 +20,8 @@ async def lifespan(app: FastAPI):
     yield
     close_llm()
     close_router_llm()
+    close_planner_llm()
+    close_repurposer_llm()
 
 
 app = FastAPI(title="Gadgents", version="2.0.0", lifespan=lifespan)
@@ -35,6 +39,8 @@ app.include_router(agents.router)
 app.include_router(billing.router)
 app.include_router(pipeline.router)
 app.include_router(router_routes.router)
+app.include_router(planner.router)
+app.include_router(repurposer.router)
 
 
 @app.get("/health")

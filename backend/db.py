@@ -36,6 +36,165 @@ class Subscription(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+# ===========================================================================
+# Proactive secretary subsystem (agent #1). The personal-planner agent is the
+# "brain"; these models are the state it reads/writes so a future scheduled
+# reminder loop + delivery channel can drive it. Designed channel-agnostic.
+# ===========================================================================
+
+# Item kinds the capture layer classifies everything into.
+ItemKind = str  # task | appointment | idea | reference | waiting_on | someday
+
+
+class InboxItem(SQLModel, table=True):
+    """Raw brain-dump before classification."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    raw_text: str
+    source: str = "chat"  # chat | url | screenshot | note
+    kind: Optional[str] = None  # filled after classification
+    status: str = "new"  # new | processed | archived
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    processed_at: Optional[datetime] = None
+
+
+class Project(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    name: str
+    goal: str = ""
+    status: str = "active"  # active | done | paused
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class Task(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    project_id: Optional[int] = None
+    title: str
+    next_action: str = ""  # the single concrete next step
+    duration_min: int = 30
+    urgency: int = Field(default=3, ge=1, le=5)  # 1 low .. 5 now
+    confidence: int = Field(default=3, ge=1, le=5)  # how sure the plan is right
+    status: str = "open"  # open | scheduled | done | deferred | dropped
+    due: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class CalendarEvent(SQLModel, table=True):
+    """Hard external commitment (birthday, meeting) the plan must respect."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    title: str
+    start: datetime
+    end: datetime
+    source: str = "user"
+
+
+class TimeBlock(SQLModel, table=True):
+    """A slot on the day plan. May be linked to a task or be a protected focus block."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    task_id: Optional[int] = None
+    title: str
+    start: datetime
+    end: datetime
+    kind: str = "task"  # focus | admin | deep_work | break | disruption
+    focus: bool = False  # protected deep-work block
+
+
+class Reminder(SQLModel, table=True):
+    """One escalation stage of a nudge. The loop fires due reminders, escalates,
+    then auto-reslots if ignored."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    task_id: Optional[int] = None
+    trigger_at: datetime
+    stage: int = 1  # 1 soft nudge .. 3 "snooze or commit?" .. 4 auto-reslot
+    channel: str = "inbox"  # inbox | email | webhook (delivery wired later)
+    message: str = ""
+    status: str = "pending"  # pending | sent | done | skipped
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class KnowledgeItem(SQLModel, table=True):
+    """Captured URLs / copy / screenshots the secretary makes sense of later."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    content: str
+    kind: str = "url"  # url | copy | screenshot | note
+    topic: str = ""
+    usefulness: int = Field(default=3, ge=1, le=5)
+    relevance: str = "business"  # business | private | both
+    action_type: str = ""  # content_idea | sales_lead | tool_to_test | process | interest
+    source: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class DailyReview(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    day: datetime
+    summary: str = ""
+    backlog_cleanup: str = ""
+    patterns: str = ""
+
+
+class PlannerMemory(SQLModel, table=True):
+    """Learning layer: stable preferences the agent adapts over time.
+    key examples: tone, focus_protection, working_hours, snooze_style, replan_aggressiveness."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    key: str
+    value: str  # JSON-encoded preference
+    confidence: int = Field(default=2, ge=1, le=5)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+def set_memory(session: Session, user_id: int, key: str, value: str, confidence: int = 2) -> None:
+    existing = session.exec(
+        select(PlannerMemory).where(PlannerMemory.user_id == user_id, PlannerMemory.key == key)
+    ).first()
+    if existing:
+        existing.value = value
+        existing.confidence = confidence
+        existing.updated_at = datetime.now(timezone.utc)
+        session.add(existing)
+    else:
+        session.add(PlannerMemory(user_id=user_id, key=key, value=value, confidence=confidence))
+    session.commit()
+
+
+def get_memories(session: Session, user_id: int) -> list[PlannerMemory]:
+    return list(session.exec(select(PlannerMemory).where(PlannerMemory.user_id == user_id)).all())
+
+
+# ===========================================================================
+# Content Repurposer (agent #2) state: canonical brief + per-channel outputs.
+# ===========================================================================
+class ContentBrief(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    source_title: str = ""
+    source_text: str = ""         # truncated original for reference
+    channels: str = ""            # csv of requested channels
+    tone: str = ""
+    audience: str = ""
+    brief_json: str = ""          # the structured brief JSON
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ContentOutput(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    brief_id: int = Field(index=True)
+    user_id: int = Field(index=True)
+    channel: str = ""             # linkedin|facebook|x|instagram|youtube|shorts_tiktok|script|media
+    variant_index: int = 0
+    content_json: str = ""        # per-channel JSON or script package
+    model: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 engine = None
 
 
