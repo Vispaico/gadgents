@@ -195,6 +195,43 @@ class ContentOutput(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+# ===========================================================================
+# Lead Finder (agent #3) state: persisted ICP runs + discovered leads.
+# Sourced from public web only (scrape public sites + business emails); GDPR-safe.
+# ===========================================================================
+class LeadQuery(SQLModel, table=True):
+    """One ICP definition + the search terms the agent generated for it."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    name: str = ""                           # human label for the run
+    offer: str = ""                          # what the client sells
+    geography: str = ""                       # locality / region added to queries
+    target_description: str = ""             # free-text ICP / niches / exclusions
+    company_size: str = ""                   # e.g. "11-50", "1-10"
+    language: str = "en"
+    search_terms_json: str = ""              # list[str] of generated Google search strings
+    raw_notes: str = ""                      # agent's ICP rationale / notes
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class Lead(SQLModel, table=True):
+    """A discovered + scored company/lead for a given query run."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    query_id: int = Field(index=True)
+    user_id: int = Field(index=True)
+    domain: str = ""
+    name: str = ""                           # business name if known
+    emails_json: str = ""                    # list[str] business emails found
+    site_age_label: str = ""
+    audit_json: str = ""                     # online-presence audit (bloat, messaging, flags)
+    fit_score: int = 0                       # 0-100 agent fit score
+    fit_rationale: str = ""
+    why_now: str = ""                        # the "invisible but excellent" gap angle
+    suggested_angle: str = ""                # first outreach angle for the client
+    status: str = "new"                      # new | contacted | rejected | archived
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 engine = None
 
 

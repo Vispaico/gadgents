@@ -113,6 +113,7 @@ function Home({ user, setError, onBought, onLogout }) {
         <nav>
           <button className={tab === "bots" ? "active" : ""} onClick={() => setTab("bots")}>Bots</button>
           <button className={tab === "content" ? "active" : ""} onClick={() => setTab("content")}>Content Studio</button>
+          <button className={tab === "leads" ? "active" : ""} onClick={() => setTab("leads")}>Lead Finder</button>
           <button className={tab === "billing" ? "active" : ""} onClick={() => setTab("billing")}>Billing</button>
           <button className="link" onClick={onLogout}>Log out</button>
         </nav>
@@ -120,6 +121,7 @@ function Home({ user, setError, onBought, onLogout }) {
       <main>
         {tab === "bots" && <BotList user={user} />}
         {tab === "content" && <ContentStudio user={user} setError={setError} />}
+        {tab === "leads" && <LeadFinder user={user} setError={setError} />}
         {tab === "billing" && <Billing onBought={onBought} />}
       </main>
     </div>
@@ -302,6 +304,181 @@ function Billing({ onBought }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function LeadFinder({ user, setError }) {
+  // Structured ICP fields
+  const [name, setName] = useState("");
+  const [offer, setOffer] = useState("");
+  const [geography, setGeography] = useState("");
+  const [target, setTarget] = useState("");
+  const [companySize, setCompanySize] = useState("");
+  const [language, setLanguage] = useState("en");
+  const [useFirecrawl, setUseFirecrawl] = useState(false);
+
+  // Chat refinement panel (feeds the same ICP)
+  const [chat, setChat] = useState([]);
+  const [chatInput, setChatInput] = useState("");
+  const [history, setHistory] = useState([]);
+
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [past, setPast] = useState([]);
+
+  useEffect(() => {
+    api.leadList().then(setPast).catch(() => {});
+  }, []);
+
+  async function sendChat() {
+    if (!chatInput.trim()) return;
+    setBusy(true);
+    setErr("");
+    const text = chatInput;
+    setChat((m) => [...m, { role: "user", content: text }]);
+    setHistory((h) => [...h, { role: "user", content: text }]);
+    setChatInput("");
+    try {
+      const res = await api.leadIcpChat(text, history);
+      setChat((m) => [...m, { role: "assistant", content: res.text }]);
+      setHistory((h) => [...h, { role: "assistant", content: res.text }]);
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function run() {
+    if (!offer.trim()) {
+      setErr("Describe what you sell (the offer) so we can find your leads.");
+      return;
+    }
+    setBusy(true);
+    setErr("");
+    setResult(null);
+    try {
+      const icp = {
+        name,
+        offer,
+        geography,
+        target_description: target + (history.length ? `\nRefinement from chat:\n${history.map((m) => `${m.role}: ${m.content}`).join("\n")}` : ""),
+        company_size: companySize,
+        language,
+        use_firecrawl: useFirecrawl,
+      };
+      const res = await api.leadRun(icp);
+      setResult(res);
+      if (user) user.credits = res.credits_used != null ? user.credits : user.credits;
+      api.leadList().then(setPast).catch(() => {});
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="studio">
+      <h2>Lead Finder</h2>
+      <p className="muted">
+        Define who you want as clients. Fill the fields, or chat with the agent to sharpen the
+        target. Then run discovery across the public web (GDPR-safe: public pages + business
+        emails only).
+      </p>
+
+      <div className="fields">
+        <label>Run name<input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Berlin boutique consultancies" /></label>
+        <label>Your offer *<input value={offer} onChange={(e) => setOffer(e.target.value)} placeholder="what you sell / the service" /></label>
+        <label>Geography<input value={geography} onChange={(e) => setGeography(e.target.value)} placeholder="e.g. Berlin, Vietnam, remote" /></label>
+        <label>Company size<select value={companySize} onChange={(e) => setCompanySize(e.target.value)}>
+          <option value="">any</option>
+          <option value="1-10">1-10</option>
+          <option value="11-50">11-50</option>
+          <option value="51-200">51-200</option>
+        </select></label>
+        <label>Language<select value={language} onChange={(e) => setLanguage(e.target.value)}>
+          <option value="en">English</option>
+          <option value="de">German</option>
+          <option value="es">Spanish</option>
+          <option value="fr">French</option>
+        </select></label>
+        <label>Target / niche / exclusions<textarea value={target} onChange={(e) => setTarget(e.target.value)} placeholder="boutique strategy consultancies 10-50 people; exclude giants like McKinsey" /></label>
+        <label className="row">
+          <input type="checkbox" checked={useFirecrawl} onChange={(e) => setUseFirecrawl(e.target.checked)} />
+          Use Firecrawl (local docker :3002) for JS-rendered discovery + deep audit
+        </label>
+      </div>
+
+      <div className="icp-chat">
+        <h3>Refine with the agent</h3>
+        <div className="messages">
+          {chat.length === 0 && <p className="muted">Ask it to narrow the niche, suggest exclusions, or pick a target segment.</p>}
+          {chat.map((m, i) => (
+            <div key={i} className={`msg ${m.role}`}>{m.content}</div>
+          ))}
+        </div>
+        <div className="composer">
+          <textarea
+            value={chatInput}
+            placeholder="e.g. focus on legal boutiques and exclude personal injury"
+            onChange={(e) => setChatInput(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && (e.preventDefault(), sendChat())}
+          />
+          <button disabled={busy} onClick={sendChat}>{busy ? "…" : "Send"}</button>
+        </div>
+      </div>
+
+      <button disabled={busy || !offer.trim()} onClick={run}>
+        {busy ? "Searching…" : "Run Lead Finder"}
+      </button>
+      {err && <div className="error">{err}</div>}
+
+      {result && (
+        <div className="result">
+          <h3>ICP</h3>
+          <p><strong>Clarified:</strong> {result.icp.clarified}</p>
+          {result.icp.notes && <p className="muted">{result.icp.notes}</p>}
+          <h3>Search strings</h3>
+          <ul>
+            {result.icp.search_terms.map((t, i) => (
+              <li key={i}><code>{t.query}</code> <span className="muted">— {t.why}</span></li>
+            ))}
+          </ul>
+          <h3>Leads ({result.leads.length})</h3>
+          {result.leads.length === 0 && <p className="muted">No domains discovered. Try a broader geography or different terms.</p>}
+          <div className="grid">
+            {result.leads.map((l, i) => (
+              <div className="card" key={i}>
+                <h3><a href={`https://${l.domain}`} target="_blank" rel="noreferrer">{l.domain}</a></h3>
+                <span className="badge">fit {l.score.fit_score}</span>
+                <p className="muted">age: {l.audit.site_age_label || "unknown"}</p>
+                {l.emails.length > 0 && <p className="muted">emails: {l.emails.join(", ")}</p>}
+                {l.score.suggested_angle && <p><strong>Angle:</strong> {l.score.suggested_angle}</p>}
+                {l.score.why_now && <p className="muted">why now: {l.score.why_now}</p>}
+              </div>
+            ))}
+          </div>
+          <p className="muted" style={{ whiteSpace: "pre-wrap" }}>{result.gdpr_note}</p>
+        </div>
+      )}
+
+      {past.length > 0 && (
+        <div className="result">
+          <h3>Past runs</h3>
+          {past.map((q) => (
+            <div key={q.query_id} className="card">
+              <h3>{q.name}</h3>
+              <p className="muted">{q.offer} · {q.geography || "anywhere"} · {q.leads.length} leads</p>
+              {q.leads.slice(0, 5).map((l, i) => (
+                <div key={i} className="muted">• {l.domain} (fit {l.fit_score})</div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

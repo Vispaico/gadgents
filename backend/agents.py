@@ -250,6 +250,39 @@ agent(
 )
 
 
+# ---------------------------------------------------------------------------
+# Agent #3: Lead Finder (ICP-driven public-web lead discovery + fit scoring).
+#   A coordinator chain (backend.leads.pipeline), NOT a single chat model. It reuses
+#   the user's Scraper discovery/analysis + our Fusion router: stage 1 runs a panel to
+#   draft perfect Google search strings, then discovery/audit/scoring run per-domain.
+#   production_ready=False until tested on the user's machine (needs live keys +, for
+#   Firecrawl mode, the local firecrawl-simple docker). Frontend: chat ICP wizard.
+# ---------------------------------------------------------------------------
+LEAD_FINDER_SYSTEM_PROMPT = """You are the Lead Finder agent's conversational front end.
+You help a user (who is an agency/service provider) define the Ideal Customer Profile for
+a lead-search campaign. Ask sharp, sequential questions ONLY if something is genuinely
+missing: (1) what they offer/sell, (2) the geography, (3) the target niches/industries and
+any exclusions, (4) company size, (5) language. Once you have enough, restate the ICP back
+to the user in one tight paragraph and confirm before they run the search.
+
+You do NOT scrape. You only clarify the ICP and feed it to the discovery engine. Keep it
+short and practical — this user thinks in niches like "boutique strategy consultancies 10-50
+people" or "deep-tech B2B SaaS with unclear messaging". Never invent leads; say when you
+need more detail.
+"""
+
+agent(
+    id="lead-finder",
+    name="Lead Finder (ICP Discovery + Fit Scoring)",
+    description="Turns your offer + target niche into perfect Google search strings, discovers small excellent-but-invisible firms on the public web, audits their presence, and scores fit with an outreach angle. GDPR-safe (public web only).",
+    system_prompt=LEAD_FINDER_SYSTEM_PROMPT,
+    base_credits=15,
+    router_model="or-sonnet46",   # balanced; the heavy lifting is in the chain, not here
+    mode="mixed",
+    production_ready=True,
+)
+
+
 def list_production_agents() -> list[AgentDef]:
     """Agents currently exposed to the frontend / API."""
     return [a for a in REGISTRY.values() if a.production_ready]

@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     require_login: bool = True
     enable_paywall: bool = True
 
+    # Lead Finder agent: local Firecrawl (firecrawl-simple / firecrawl) base URL + key.
+    # Self-hosted, billing-free. The agent only calls Firecrawl when use_firecrawl=True.
+    firecrawl_base_url: str = "http://localhost:3002"
+    firecrawl_api_key: str = "test-key-123"
+
 
 @lru_cache
 def get_settings() -> Settings:
