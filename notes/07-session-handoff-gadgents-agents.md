@@ -150,6 +150,52 @@ Bots · Content Studio · Lead Finder · Wan Video · Billing. Dev-bypass skips 
 - CloakBrowser / PageIndex = NOT used (CloakBrowser = overkill/ToS risk; PageIndex = RAG
   retrieval, not discovery). Firecrawl-simple = kept (already in Scraper toolkit).
 
+## Session update (2026-07-13) — Content Studio 3-mode eval
+- User ran Content Studio in Economic/Balanced/Quality on the SAME literary article and
+  had the three outputs blindly evaluated. Winner: Quality (9.7) > Balanced (8.9) > Economic (7.7).
+- Key finding: stage-1 `prompt-engineer` output is identical across modes (pinned `or-qwen37`
+  by design — `pipeline.py` calls stage 1 with NO override). The visible quality gap is
+  entirely stage-2 `content-producer` (or-llama33 vs or-sonnet46 vs or-opus). The eval's
+  "Prompt quality" row is largely misattributed: the evaluator read the final content (stage 2)
+  and credited the prompt. Temperature is 0.7 (no seed) in `llm.py`, so even identical qwen37
+  runs vary run-to-run, but cannot systematically correlate with the mode label.
+- Decision: KEEP `prompt-engineer` pinned to `or-qwen37`. The Quality/Cost toggle is meaningful
+  only through stage-2. No code change.
+- Takeaway for tuning: if a user later wants the *prompts themselves* to scale with the toggle,
+  add `CONTENT_PROMPT_ENGINEER_MODEL_BY_MODE` (mirror `CONTENT_PRODUCER_MODEL_BY_MODE`) — not
+  built, defined as a future hook only.
+
+## Session update (2026-07-13, part 2) — Content agent consolidation
+- User wanted `prompt-engineer`, `content-producer`, `content-repurposer` removed from the
+  Bots page and consolidated into the Content Studio, with a choosable output mode and a
+  "Send to Wan" button. Decisions: THREE discrete radio modes (Prompts / Content+Media /
+  Repurpose), and a "Send to Wan Video" button on the prompts result.
+- Backend changes:
+  * `AgentDef` gained `show_in_bots: bool = True`. `list_production_agents()` unchanged;
+    added `list_bot_agents()` (production + show_in_bots). `routes/agents.py` now uses
+    `list_bot_agents()`, so the 3 content agents no longer appear as cards (verified:
+    /api/agents returns only coder, personal-planner, lead-finder, wan-video).
+  * The 3 agents keep `production_ready=True` + `show_in_bots=False` so they still power
+    the Studio. No agent removed from REGISTRY.
+  * `pipeline.py run_content_pipeline` gained `output_mode` param: "prompts" (stage-1 only),
+    "content" (default 2-stage), "repurpose" (delegates to `content-repurposer` Fusion agent;
+    platform labels mapped to its channel ids). `routes/pipeline.py` accepts `output_mode`.
+    Mode toggle flows through all three (prompts pins qwen37; repurpose honors override_mode).
+- Frontend changes:
+  * `api.pipeline` now passes `output_mode`.
+  * `ContentStudio` rewritten: radio `output-modes` (Prompts / Content+Media / Repurpose),
+    platform chips, and a "→ Send prompts to Wan Video" link on prompt results.
+  * `Home` holds `wanSeed` state; selecting Wan tab seeds `WanVideo` concept with the prompts.
+  * Added `.output-modes` CSS.
+- Verified: backend imports OK, /api/agents filtered, /api/pipeline/content with
+  output_mode=repurpose + prompts both parse and return 200 (live OpenRouter call succeeded).
+  Frontend `npm run build` passes.
+- NOTE: repurposer currently still persists briefs in `routes/repurposer.py` at /api/repurposer.
+  We did NOT wire the Studio "Repurpose" mode to that persistence path — it calls the agent
+  directly via the pipeline. The /api/repurposer/run route is now somewhat redundant; left as-is.
+  If user wants Repurpose runs saved to history, route the pipeline repurpose through
+  repurposer.py instead of calling the agent inline.
+
 ## Next steps (per original plan + where we are)
 - PER-AGENT TUNING (in progress): adjust `router_model` pins / `mode` / Fusion usage per
   agent. DONE FIRST: Content Studio per-mode mapping (see Recent changes). Still to do / user

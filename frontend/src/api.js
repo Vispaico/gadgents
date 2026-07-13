@@ -52,8 +52,8 @@ export const api = {
   plans: () => req("GET", "/billing/plans"),
   me: () => req("GET", "/billing/me"),
   buy: (plan) => req("POST", "/billing/buy", { plan }),
-  pipeline: (material, platforms) =>
-    req("POST", "/pipeline/content", { material, platforms }),
+  pipeline: (material, platforms, output_mode = "content") =>
+    req("POST", "/pipeline/content", { material, platforms, output_mode }),
   leadIcpChat: (message, history) =>
     req("POST", "/leadfinder/icp-chat", { message, history }),
   leadRun: (icp) => req("POST", "/leadfinder/run", { icp }),

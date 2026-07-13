@@ -67,6 +67,14 @@ textarea.big { min-height: 160px; resize: vertical; }
 main { min-height: 60vh; }
 h1, h2, h3 { margin: 0 0 4px; }
 
+/* Content Studio output modes */
+.output-modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.output-modes .card { cursor: pointer; display: flex; flex-direction: column; gap: 4px; }
+.output-modes .card:hover { border-color: var(--accent); }
+.output-modes .card.active { border-color: var(--accent); outline: 2px solid var(--accent); }
+.output-modes .card span { font-size: 12px; }
+@media (max-width: 640px) { .output-modes { grid-template-columns: 1fr; } }
+
 /* Lead Finder */
 .fields { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
 .fields label { display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: var(--muted); }

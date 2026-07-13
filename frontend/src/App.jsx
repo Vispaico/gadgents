@@ -123,6 +123,7 @@ function AuthScreen({ error, setError, onLogin, onRegister, busy }) {
 
 function Home({ user, setError, onBought, onLogout }) {
   const [tab, setTab] = useState("bots");
+  const [wanSeed, setWanSeed] = useState("");  // concept passed from Content Studio -> Wan tab
   return (
     <div className="app">
       <header>
@@ -141,9 +142,15 @@ function Home({ user, setError, onBought, onLogout }) {
       </header>
       <main>
         {tab === "bots" && <BotList user={user} />}
-        {tab === "content" && <ContentStudio user={user} setError={setError} />}
+        {tab === "content" && (
+          <ContentStudio
+            user={user}
+            setError={setError}
+            onSendToWan={(prompts) => { setWanSeed(prompts); setTab("wan"); }}
+          />
+        )}
         {tab === "leads" && <LeadFinder user={user} setError={setError} />}
-        {tab === "wan" && <WanVideo user={user} setError={setError} />}
+        {tab === "wan" && <WanVideo user={user} setError={setError} seed={wanSeed} />}
         {tab === "billing" && <Billing onBought={onBought} />}
       </main>
     </div>
@@ -244,9 +251,16 @@ function BotList({ user }) {
   );
 }
 
-function ContentStudio({ user, setError }) {
+const CONTENT_OUTPUTS = [
+  { id: "prompts", label: "Prompts", desc: "Per-platform generation prompts (use in Wan or elsewhere)" },
+  { id: "content", label: "Content + Media", desc: "Finished posts, hooks, hashtags, media suggestions" },
+  { id: "repurpose", label: "Repurpose / Summarize", desc: "Multi-platform + media suggestions + short-video script" },
+];
+
+function ContentStudio({ user, setError, onSendToWan }) {
   const [material, setMaterial] = useState("");
   const [platforms, setPlatforms] = useState(["Instagram", "TikTok"]);
+  const [output, setOutput] = useState("content");
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -261,7 +275,7 @@ function ContentStudio({ user, setError }) {
     setErr("");
     setResult(null);
     try {
-      const res = await api.pipeline(material, platforms);
+      const res = await api.pipeline(material, platforms, output);
       setResult(res);
       user.credits = res.remaining_credits;
     } catch (e) {
@@ -274,13 +288,29 @@ function ContentStudio({ user, setError }) {
   return (
     <div className="studio">
       <h2>Content Studio</h2>
-      <p className="muted">Paste an article, image notes or video idea. We turn it into prompts, then finished content.</p>
+      <p className="muted">
+        Paste an article, image notes or video idea. Pick an output, choose platforms, generate.
+      </p>
       <textarea
         className="big"
         value={material}
         placeholder="Paste your source material or idea here…"
         onChange={(e) => setMaterial(e.target.value)}
       />
+
+      <div className="output-modes">
+        {CONTENT_OUTPUTS.map((o) => (
+          <button
+            key={o.id}
+            className={output === o.id ? "card active" : "card"}
+            onClick={() => setOutput(o.id)}
+          >
+            <strong>{o.label}</strong>
+            <span className="muted">{o.desc}</span>
+          </button>
+        ))}
+      </div>
+
       <div className="chips">
         {ALL_PLATFORMS.map((p) => (
           <button
@@ -293,15 +323,26 @@ function ContentStudio({ user, setError }) {
         ))}
       </div>
       <button disabled={busy || platforms.length === 0} onClick={run}>
-        {busy ? "Generating…" : "Generate prompts + content"}
+        {busy ? "Generating…" : `Generate: ${CONTENT_OUTPUTS.find((o) => o.id === output).label}`}
       </button>
       {err && <div className="error">{err}</div>}
       {result && (
         <div className="result">
-          <h3>Prompts</h3>
-          <pre>{result.prompts}</pre>
-          <h3>Content</h3>
-          <pre>{result.content}</pre>
+          {output === "prompts" && result.prompts && (
+            <>
+              <h3>Prompts</h3>
+              <pre>{result.prompts}</pre>
+              <button className="link" onClick={() => onSendToWan(result.prompts)}>
+                → Send prompts to Wan Video
+              </button>
+            </>
+          )}
+          {result.content && (
+            <>
+              <h3>{output === "prompts" ? "Content" : output === "repurpose" ? "Repurposed content" : "Content + Media"}</h3>
+              <pre>{result.content}</pre>
+            </>
+          )}
           <p className="muted">used {result.credits_used} credits · {result.remaining_credits} left</p>
         </div>
       )}
@@ -526,9 +567,9 @@ function LeadFinder({ user, setError }) {
   );
 }
 
-function WanVideo({ user, setError }) {
+function WanVideo({ user, setError, seed = "" }) {
   const [sourceImage, setSourceImage] = useState("");
-  const [concept, setConcept] = useState("");
+  const [concept, setConcept] = useState(seed);
   const [formatKind, setFormatKind] = useState("");
   const [title, setTitle] = useState("");
   const [result, setResult] = useState(null);

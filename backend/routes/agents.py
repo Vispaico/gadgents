@@ -2,7 +2,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlmodel import Session
 
-from backend.agents import list_production_agents, get_agent, run_agent
+from backend.agents import list_bot_agents, get_agent, run_agent
 from backend.auth import get_current_user
 from backend.billing import InsufficientCredits, charge
 from backend.config import get_settings
@@ -24,10 +24,12 @@ class ChatOut(BaseModel):
 
 @router.get("")
 def list_agents():
-    # Only agents flagged production_ready are exposed; no router edits needed for new agents.
+    # Only production agents flagged show_in_bots appear as cards; the content-stage
+    # agents (prompt-engineer, content-producer, content-repurposer) are hidden here
+    # because they're surfaced inside Content Studio instead.
     return [
         {"id": a.id, "name": a.name, "description": a.description, "model": a.model}
-        for a in list_production_agents()
+        for a in list_bot_agents()
     ]
 
 

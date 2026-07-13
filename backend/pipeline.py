@@ -28,6 +28,25 @@ CONTENT_PRODUCER_MODEL_BY_MODE = {
     "quality": "or-opus",
 }
 
+# Map Content Studio platform labels to the repurposer's channel ids.
+_REPURPOSER_CHANNELS = {
+    "Instagram": "instagram",
+    "TikTok": "shorts_tiktok",
+    "LinkedIn": "linkedin",
+    "X": "x",
+    "YouTube": "youtube",
+    "Facebook": "facebook",
+}
+
+
+def _normalize_mode(mode: str | None) -> str | None:
+    """Map the frontend toggle onto our canonical mode keys."""
+    if mode in ("economic", "mixed", "balanced"):
+        return "economic" if mode == "economic" else "balanced"
+    if mode in ("high", "quality"):
+        return "quality"
+    return None
+
 
 def run_content_pipeline(
     session: Session,
@@ -36,20 +55,58 @@ def run_content_pipeline(
     platforms: list[str],
     llm: LLMClient,
     mode: str | None = None,
+    output_mode: str = "content",
 ) -> dict:
     pe = get_agent("prompt-engineer")
     cp = get_agent("content-producer")
     if pe is None or cp is None:
         raise RuntimeError("Pipeline agents missing")
 
-    # Normalize mode to the canonical keys used by the toggle.
-    norm_mode = None
-    if mode in ("economic", "mixed", "balanced"):
-        norm_mode = "economic" if mode == "economic" else ("balanced" if mode in ("mixed", "balanced") else "balanced")
-    elif mode in ("high", "quality"):
-        norm_mode = "quality"
+    norm_mode = _normalize_mode(mode)
     cp_model = CONTENT_PRODUCER_MODEL_BY_MODE.get(norm_mode) if norm_mode else None
 
+    # Prompts-only: stage 1, no content generation.
+    if output_mode == "prompts":
+        stage1_input = (
+            f"Source material:\n\"\"\"\n{raw_material}\n\"\"\"\n\n"
+            f"Produce generation prompts for these platforms: {', '.join(platforms)}."
+        )
+        prompts_text, t1i, t1o, c1 = run_agent(pe, stage1_input, llm)
+        total_credits = c1
+        charge(session, user, "content-pipeline", total_credits, t1i, t1o)
+        return {
+            "prompts": prompts_text,
+            "content": "",
+            "credits_used": total_credits,
+            "remaining_credits": user.credits if user else 0,
+        }
+
+    # Repurpose: delegate to the Fusion repurposer agent (rich multi-platform +
+    # media suggestions + short-video script package). Channels map to its ids.
+    if output_mode == "repurpose":
+        rp = get_agent("content-repurposer")
+        if rp is None:
+            raise RuntimeError("Repurposer agent missing")
+        channels = [
+            _REPURPOSER_CHANNELS[p] for p in platforms if p in _REPURPOSER_CHANNELS
+        ] or list(_REPURPOSER_CHANNELS.values())
+        user_msg = (
+            f"Audience: general\nBrand voice/tone: match the source's own voice\n"
+            f"Produce outputs for these platforms ONLY: {', '.join(channels)}.\n"
+            f"If 'shorts_tiktok' is selected, also produce the script package and "
+            f"media_suggestions.\n\n"
+            f"ARTICLE / ESSAY:\n\"\"\"\n{raw_material}\n\"\"\""
+        )
+        text, t1i, t1o, c1 = run_agent(rp, user_msg, llm, override_mode=norm_mode)
+        charge(session, user, "content-pipeline", c1, t1i, t1o)
+        return {
+            "prompts": "",
+            "content": text,
+            "credits_used": c1,
+            "remaining_credits": user.credits if user else 0,
+        }
+
+    # Content+Media (default): stage 1 prompts -> stage 2 finished content.
     stage1_input = (
         f"Source material:\n\"\"\"\n{raw_material}\n\"\"\"\n\n"
         f"Produce generation prompts for these platforms: {', '.join(platforms)}."
@@ -63,10 +120,7 @@ def run_content_pipeline(
     content_text, t2i, t2o, c2 = run_agent(cp, stage2_input, llm, override_model=cp_model)
 
     total_credits = c1 + c2
-    try:
-        charge(session, user, "content-pipeline", total_credits, t1i + t2i, t1o + t2o)
-    except InsufficientCredits:
-        raise
+    charge(session, user, "content-pipeline", total_credits, t1i + t2i, t1o + t2o)
 
     return {
         "prompts": prompts_text,

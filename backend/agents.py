@@ -41,6 +41,9 @@ class AgentDef:
     # When True the agent is exposed by the list/chat routes. Keep False while a new
     # agent is in development; flip to True to ship it (auto-wired, no router edit).
     production_ready: bool = True
+    # When False the agent still runs (e.g. powering Content Studio) but its card is
+    # hidden from the Bots page so users aren't exposed to raw stages of a flow.
+    show_in_bots: bool = True
 
 
 def agent(production_ready: bool = True, **fields) -> AgentDef:
@@ -80,6 +83,7 @@ agent(
     ),
     base_credits=5,
     router_model="or-qwen37",  # cheap, high-quality via OpenRouter (Mixed default)
+    show_in_bots=False,  # stage 1 of Content Studio; surfaced there, not as a bare bot
 )
 
 # ---------------------------------------------------------------------------
@@ -99,6 +103,7 @@ agent(
     ),
     base_credits=5,
     router_model="or-llama33",  # llama-3.3 for short posts/summaries out of long text
+    show_in_bots=False,  # stage 2 of Content Studio; surfaced there, not as a bare bot
 )
 
 # Utility agent shipped as a real, working example.
@@ -247,6 +252,7 @@ agent(
     fusion_judge="or-opus",
     router_model=None,
     mode="high",
+    show_in_bots=False,  # surfaced inside Content Studio's "Repurpose" mode, not as a bare bot
 )
 
 
@@ -312,6 +318,11 @@ agent(
 def list_production_agents() -> list[AgentDef]:
     """Agents currently exposed to the frontend / API."""
     return [a for a in REGISTRY.values() if a.production_ready]
+
+
+def list_bot_agents() -> list[AgentDef]:
+    """Production agents that should appear as cards on the Bots page."""
+    return [a for a in list_production_agents() if a.show_in_bots]
 
 
 def run_agent(

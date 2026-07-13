@@ -26,6 +26,7 @@ class ContentOut(BaseModel):
 def content(
     material: str = Body(..., embed=True),
     platforms: list[str] = Body(..., embed=True),
+    output_mode: str = Body("content"),
     mode: str | None = None,
     user: User = Depends(get_current_user) if _settings.require_login else None,
     session: Session = Depends(get_session),
@@ -34,7 +35,8 @@ def content(
         user = None
     try:
         result = run_content_pipeline(
-            session, user, material, platforms, _llm, mode=mode
+            session, user, material, platforms, _llm,
+            mode=mode, output_mode=output_mode,
         )
     except InsufficientCredits as exc:
         raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=str(exc))
