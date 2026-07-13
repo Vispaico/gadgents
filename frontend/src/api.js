@@ -41,4 +41,8 @@ export const api = {
     req("POST", "/leadfinder/icp-chat", { message, history }),
   leadRun: (icp) => req("POST", "/leadfinder/run", { icp }),
   leadList: () => req("GET", "/leadfinder/leads"),
+  wanRun: (source_image, concept, format_kind = "", title = "") =>
+    req("POST", "/wan/run", { source_image, concept, format_kind, title }),
+  wanBriefs: () => req("GET", "/wan/briefs"),
+  config: () => req("GET", "/config"),
 };

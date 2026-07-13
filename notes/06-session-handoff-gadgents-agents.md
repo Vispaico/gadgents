@@ -1,5 +1,7 @@
 # Gadgents — Agent Build Session Handoff (recap + next steps)
 
+> SUPERSEDED by notes/07-session-handoff-gadgents-agents.md (current state). Read 07 first.
+
 > Read this first in the next chat. All code on disk is the source of truth; this recap
 > is just so we continue seamlessly. Context was getting deep, so we started a fresh chat.
 

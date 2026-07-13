@@ -196,6 +196,34 @@ class ContentOutput(SQLModel, table=True):
 
 
 # ===========================================================================
+# Wan2.2 Image-to-Video Prompt (agent #4) state: canonical brief + per-shot prompts.
+# ===========================================================================
+class WanVideoBrief(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    title: str = ""
+    source_image: str = ""        # url/data-ref of the seed image (kept as ref only)
+    concept: str = ""             # the concept / script / mood text
+    format_kind: str = ""         # ad | short_film | doc | podcast | reel | "" (tuning hook)
+    brief_json: str = ""          # full structured storyboard JSON
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class WanVideoShot(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    brief_id: int = Field(index=True)
+    user_id: int = Field(index=True)
+    shot_number: int = 0
+    camera: str = ""              # move name from vocabulary
+    frame: str = ""
+    action: str = ""
+    look: str = ""
+    wan_prompt: str = ""          # ready-to-paste Wan2.2 image-to-video prompt
+    model: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ===========================================================================
 # Lead Finder (agent #3) state: persisted ICP runs + discovered leads.
 # Sourced from public web only (scrape public sites + business emails); GDPR-safe.
 # ===========================================================================

@@ -283,6 +283,32 @@ agent(
 )
 
 
+# ---------------------------------------------------------------------------
+# Agent #4: Wan2.2 Image-to-Video Prompt (camera-move-driven one-shot clips).
+#   Turns a source image + concept/script/mood into a sequence of Wan2.2-ready
+#   image-to-video prompts. Each shot = one ~5s clip with one dominant camera move
+#   (from our 50-move vocabulary) so stitched clips form a coherent video. Runs in
+#   Fusion: panel covers visual reasoning + structured shot JSON + clean prompt
+#   writing, a judge (Claude Opus) synthesizes the final storyboard. Loosely chains
+#   off agents 1+2 (the repurposer/Content Studio can feed the concept).
+#   The format-structure knowledge (ads/docs/short films) is a tuning-phase hook.
+# ---------------------------------------------------------------------------
+from backend.wan.prompt_builder import build_system_prompt as _build_wan_system_prompt
+
+agent(
+    id="wan-video",
+    name="Wan2.2 Video Prompt (Image-to-Video)",
+    description="Turns a source image + concept into a sequence of Wan2.2-ready image-to-video prompts (one ~5s clip per shot) using a 50-move camera vocabulary. Multi-model (Fusion).",
+    system_prompt=_build_wan_system_prompt(),
+    base_credits=12,
+    fusion=True,
+    fusion_panel=["or-opus", "or-ds-pro", "oa-sol", "or-sonnet46"],
+    fusion_judge="or-opus",
+    router_model=None,
+    mode="high",
+)
+
+
 def list_production_agents() -> list[AgentDef]:
     """Agents currently exposed to the frontend / API."""
     return [a for a in REGISTRY.values() if a.production_ready]

@@ -19,6 +19,15 @@ prototype).
 - **Frontend**: React + Vite, proxies `/api` to the backend.
 
 ## Run locally
+
+**One command (recommended):**
+```bash
+./dev.sh          # starts backend (:8000) + frontend (:5173); Ctrl+C stops both
+```
+Open http://localhost:5173. The dev `.env` has login + paywall disabled, so you can test
+every agent with no account and no credits.
+
+**Or run them separately:**
 ```bash
 # backend
 python3 -m venv .venv && . .venv/bin/activate
@@ -29,6 +38,11 @@ uvicorn backend.app:app --port 8000 --reload
 # frontend (separate terminal)
 cd frontend && npm install && npm run dev   # http://localhost:5173
 ```
+
+**Firecrawl (optional):** the Lead Finder can do JS-rendered discovery + deep domain audit
+when its "Use Firecrawl" box is ticked. For that, run firecrawl-simple (or firecrawl) in
+Docker so it answers at `http://localhost:3002` (`FIRECRAWL_BASE_URL` in `.env`). Without it,
+Lead Finder falls back to DuckDuckGo + HTTP mode. `dev.sh` prints whether Firecrawl is reachable.
 
 ## Where things live
 ```

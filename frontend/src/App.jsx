@@ -5,17 +5,28 @@ const ALL_PLATFORMS = ["Instagram", "TikTok", "LinkedIn", "X", "YouTube", "Faceb
 
 export function App() {
   const [view, setView] = useState(getToken() ? "home" : "auth");
+  const [requireLogin, setRequireLogin] = useState(true);
   const [user, setUser] = useState(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (getToken()) {
-      api
-        .me()
-        .then((m) => setUser(m))
-        .catch(() => setToken(""));
-    }
+    // Learn whether the backend is in dev-bypass mode (REQUIRE_LOGIN=false).
+    // If not required, skip the login screen entirely and go straight to home.
+    api
+      .config()
+      .then((cfg) => {
+        setRequireLogin(!!cfg.require_login);
+        if (!cfg.require_login) {
+          // Dev-bypass: no account needed. Use a synthetic user so credits
+          // display and handler assignments don't crash.
+          setUser({ email: "", credits: 0, plan: "dev" });
+          setView("home");
+        } else if (getToken()) {
+          return api.me().then(setUser).catch(() => setToken(""));
+        }
+      })
+      .catch(() => setRequireLogin(true));
   }, []);
 
   function applyAuth(res) {
@@ -114,6 +125,7 @@ function Home({ user, setError, onBought, onLogout }) {
           <button className={tab === "bots" ? "active" : ""} onClick={() => setTab("bots")}>Bots</button>
           <button className={tab === "content" ? "active" : ""} onClick={() => setTab("content")}>Content Studio</button>
           <button className={tab === "leads" ? "active" : ""} onClick={() => setTab("leads")}>Lead Finder</button>
+          <button className={tab === "wan" ? "active" : ""} onClick={() => setTab("wan")}>Wan Video</button>
           <button className={tab === "billing" ? "active" : ""} onClick={() => setTab("billing")}>Billing</button>
           <button className="link" onClick={onLogout}>Log out</button>
         </nav>
@@ -122,6 +134,7 @@ function Home({ user, setError, onBought, onLogout }) {
         {tab === "bots" && <BotList user={user} />}
         {tab === "content" && <ContentStudio user={user} setError={setError} />}
         {tab === "leads" && <LeadFinder user={user} setError={setError} />}
+        {tab === "wan" && <WanVideo user={user} setError={setError} />}
         {tab === "billing" && <Billing onBought={onBought} />}
       </main>
     </div>
@@ -477,6 +490,101 @@ function LeadFinder({ user, setError }) {
               ))}
             </div>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WanVideo({ user, setError }) {
+  const [sourceImage, setSourceImage] = useState("");
+  const [concept, setConcept] = useState("");
+  const [formatKind, setFormatKind] = useState("");
+  const [title, setTitle] = useState("");
+  const [result, setResult] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  async function run() {
+    if (!concept.trim()) {
+      setErr("Describe the concept, script or mood you want turned into video.");
+      return;
+    }
+    setBusy(true);
+    setErr("");
+    setResult(null);
+    try {
+      const res = await api.wanRun(sourceImage, concept, formatKind, title);
+      // Agent returns a storyboard JSON in res.text (may need parsing for nested display)
+      let data = null;
+      try {
+        const txt = res.text.trim();
+        data = JSON.parse(txt.startsWith("```") ? txt.replace(/^```json?|```$/g, "") : txt);
+      } catch {
+        try { data = JSON.parse(res.text); } catch { data = null; }
+      }
+      setResult({ ...res, data });
+      api.wanBriefs().catch(() => {});
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const shots = result?.data?.shots || [];
+
+  return (
+    <div className="studio">
+      <h2>Wan2.2 Video Prompt</h2>
+      <p className="muted">
+        Drop a source image (URL or reference) and your concept. We build a storyboard of
+        Wan2.2 image-to-video shots — each a one-shot ~5s clip with one camera move from a
+        50-move vocabulary, so stitched clips form a coherent video.
+      </p>
+
+      <div className="fields">
+        <label>Source image URL<input value={sourceImage} onChange={(e) => setSourceImage(e.target.value)} placeholder="https://… or leave blank for concept-only" /></label>
+        <label>Run title<input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Product reveal ad" /></label>
+        <label>Format (optional)<select value={formatKind} onChange={(e) => setFormatKind(e.target.value)}>
+          <option value="">free / unspecified</option>
+          <option value="ad">Ad</option>
+          <option value="short_film">Short film</option>
+          <option value="doc">Documentary</option>
+          <option value="podcast">Podcast clip</option>
+          <option value="reel">Social reel</option>
+        </select></label>
+        <label style={{ gridColumn: "1 / -1" }}>Concept / script / mood<textarea
+          value={concept}
+          onChange={(e) => setConcept(e.target.value)}
+          placeholder="A lone founder at a desk at night; the camera slowly pushes in as the screen lights up with the product launch…"
+        /></label>
+      </div>
+
+      <button disabled={busy || !concept.trim()} onClick={run}>
+        {busy ? "Storyboarding…" : "Generate Wan shots"}
+      </button>
+      {err && <div className="error">{err}</div>}
+
+      {result && (
+        <div className="result">
+          <h3>{result.title || (result.data ? result.data.title : "Storyboard")}</h3>
+          {result.data?.summary && <p className="muted">{result.data.summary}</p>}
+          {result.data?.stitching_notes && <p className="muted">Stitching: {result.data.stitching_notes}</p>}
+          {shots.length === 0 && <pre>{result.text}</pre>}
+          <div className="grid">
+            {shots.map((s, i) => (
+              <div className="card" key={i}>
+                <h3>Shot {s.shot}</h3>
+                <span className="badge">{s.camera}</span>
+                <p className="muted">Frame: {s.frame}</p>
+                <p>Action: {s.action}</p>
+                <p className="muted">Look: {s.look}</p>
+                <p><strong>Wan prompt:</strong></p>
+                <pre>{s.wan_prompt}</pre>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
