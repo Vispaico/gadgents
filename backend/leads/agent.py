@@ -15,8 +15,9 @@ from .pipeline import run_lead_finder
 
 
 def run_and_persist(icp: ICPInput, llm: LLMClient, session: Session,
-                    user: Optional[User] = None) -> LeadRunResult:
-    result = run_lead_finder(icp, llm)
+                    user: Optional[User] = None,
+                    mode: Optional[str] = None) -> LeadRunResult:
+    result = run_lead_finder(icp, llm, mode=mode)
 
     user_id = user.id if user else 0
     query = LeadQuery(

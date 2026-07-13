@@ -34,6 +34,7 @@ def run(
     concept: str = Body(..., embed=True),
     format_kind: str = Body("", embed=True),
     title: str = Body(""),
+    mode: str | None = None,
     user: User = Depends(get_current_user) if _settings.require_login else None,
     session: Session = Depends(get_session),
 ):
@@ -50,7 +51,7 @@ def run(
         "Produce the storyboard of Wan2.2 image-to-video shots following your contract."
     )
 
-    text, _ti, _to, credits = run_agent(agent, user_msg, _llm, memory=None)
+    text, _ti, _to, credits = run_agent(agent, user_msg, _llm, memory=None, override_mode=mode)
 
     try:
         data = json.loads(text)

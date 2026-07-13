@@ -46,6 +46,8 @@ header {
 }
 header nav { margin-left: auto; display: flex; gap: 8px; }
 header button.active { outline: 2px solid var(--accent); }
+.mode-toggle { display: inline-flex; gap: 4px; margin-left: 12px; }
+.mode-toggle .chip { padding: 4px 10px; font-size: 12px; }
 .chat { display: flex; flex-direction: column; gap: 12px; }
 .messages { display: flex; flex-direction: column; gap: 10px; min-height: 200px; }
 .msg { padding: 10px 12px; border-radius: 10px; max-width: 80%; white-space: pre-wrap; }

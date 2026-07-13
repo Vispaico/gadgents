@@ -11,6 +11,7 @@ Frontend flow:
 from fastapi import APIRouter, Body, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlmodel import Session, select
+from typing import Optional
 
 from backend.agents import get_agent, run_agent
 from backend.auth import get_current_user
@@ -64,6 +65,7 @@ def icp_chat(
 @router.post("/run")
 def run(
     icp: ICPInput,
+    mode: str | None = None,
     user: User = Depends(get_current_user) if _settings.require_login else None,
     session: Session = Depends(get_session),
 ):
@@ -73,7 +75,7 @@ def run(
     if agent is None or not agent.production_ready:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
-    result = run_and_persist(icp, _llm, session, user=user)
+    result = run_and_persist(icp, _llm, session, user=user, mode=mode)
     return {
         "icp": result.icp.model_dump(),
         "leads": [l.model_dump() for l in result.leads],

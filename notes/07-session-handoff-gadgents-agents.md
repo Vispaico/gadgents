@@ -4,6 +4,53 @@
 > is just so we continue seamlessly. The previous handoff (notes/06-...) covered the first
 > agent-build session; this one continues from there and is the current state. We started a
 > fresh chat the same way (read the handoff, then the todo list reflects real state).
+>
+> CONTEXT: this thread reached ~77% of its context window. Start a NEW chat, re-read this
+> file, then `git status` / `git log`. Keep using notes/07 as the single source of continuity.
+
+## Recent changes since the initial #2 write (mode toggle + tuning kickoff)
+- ADDED global **quality/cost mode toggle** in the frontend header (Quality / Balanced /
+  Economic) → sends `?mode=` on every agent call. Backend: `run_agent` gained `override_mode`
+  (swaps Fusion preset when forced) and `override_model` (race-free per-call model pin swap).
+  Applied as a query param on `/agents/{id}/chat`, `/repurposer/run`, `/leadfinder/run`,
+  `/wan/run`, `/pipeline/content`. Single-model pins (coder, prompt-engineer, content-producer)
+  keep their pins UNLESS explicitly overridden.
+- CONTENT STUDIO now honors the toggle via per-mode stage-2 model in `backend/pipeline.py`
+  `CONTENT_PRODUCER_MODEL_BY_MODE`:
+  * prompt-engineer stays `or-qwen37` in all modes.
+  * content-producer: Economic = `or-llama33` (cheap, current default), Balanced = `or-sonnet46`
+    (claude-sonnet-4.6), Quality = `or-opus` (claude-opus-4.8).
+  User confirmed Quality output > Balanced at same cost for Content Studio; chose to keep
+  Content Studio's toggle meaningful (quality = opus, balanced = sonnet, economic = llama).
+- ADDED React Error Boundary in `frontend/src/main.jsx` so render crashes show the error
+  instead of a black screen.
+- ADDED `GET /api/config` returning `require_login`/`enable_paywall`/`providers`; frontend
+  skips the login screen in dev-bypass mode (synthetic dev user).
+
+## Bugs fixed this session (important — some were silent until tested in browser)
+1. Frontend `ModeToggle` called `getMode()` but only `setMode` was imported →
+   `ReferenceError: getMode is not defined` → black screen. FIX: import `getMode` in App.jsx.
+2. `/api/pipeline/content` returned **422** — FastAPI auto-wrapped the single Pydantic body
+   model, so it expected `{payload:{...}}` while frontend sends flat `{material,platforms}`.
+   FIX: split into `material` + `platforms` as `Body(..., embed=True)`.
+3. Pipeline crashed on `user.credits` when `user is None` (dev-bypass). FIX:
+   `user.credits if user else 0`. (`charge()` already no-ops when paywall off.)
+4. Stale dev server: an old `npm run dev` held :5173 → black screen. Always restart via
+   `./dev.sh` (it falls back to :5174 if :5173 busy) and hard-refresh.
+
+## Model routing cheat-sheet (where the toggle actually bites)
+- Single-model pinned agents (their pins DON'T change with the toggle): `prompt-engineer`
+  (or-qwen37), `content-producer` (or-llama33 base, but Content Studio overrides per mode),
+  `coder` (oa-codex), `lead-finder` chat wizard (or-sonnet46).
+- Mode-driven (non-pinned): `personal-planner` (mode=high), `lead-finder` audit (or-sonnet46),
+  scoring (or-llama33). These honor `override_mode` for `goal`.
+- Fusion agents honor `override_mode` by swapping to `_FUSION_PRESETS[mode]`:
+  content-repurposer & wan-video (default custom panels) + lead-finder ICP stage.
+- Default Fusion presets: high `[or-opus,or-kimi,or-ds-pro,oa-sol]`/judge or-opus ·
+  mixed `[or-sonnet46,or-qwen37,oa-luna]`/judge or-sonnet5 ·
+  economic `[or-ds-flash-free,or-haiku,oa-nano]`/judge or-haiku.
+
+
 
 ## How to resume a chat from this note
 1. Open this file (notes/07-...) and skim it.
@@ -104,13 +151,18 @@ Bots · Content Studio · Lead Finder · Wan Video · Billing. Dev-bypass skips 
   retrieval, not discovery). Firecrawl-simple = kept (already in Scraper toolkit).
 
 ## Next steps (per original plan + where we are)
-- PER-AGENT TUNING (next, in progress): adjust `router_model` pins / `mode` / Fusion usage
-  per agent once the user has used the frontend and seen real outputs. Candidate tweaks:
+- PER-AGENT TUNING (in progress): adjust `router_model` pins / `mode` / Fusion usage per
+  agent. DONE FIRST: Content Studio per-mode mapping (see Recent changes). Still to do / user
+  feedback pending:
   * lead-finder ICP stage already Fusion; audit uses `or-sonnet46` (cheap), scoring
-    `or-llama33`. Possibly raise scoring to a stronger model.
+    `or-llama33`. Possibly raise scoring to a stronger model. User hasn't tested Lead Finder
+    outputs yet.
   * wan-video Fusion panel is heavy (4 models incl or-opus x2); consider economic preset for
-    drafts.
+    drafts. User hasn't tested Wan outputs yet.
   * personal-planner mode=high already.
+  * coder stays pinned oa-codex (intentional; toggle won't change it).
+  * Decide whether OTHER single-model agents should also honor the toggle (currently only
+    Content Studio stage-2 maps per mode; prompt-engineer/coder keep fixed pins by design).
 - PRODUCTIONIZE (deferred): hosting; flip `REQUIRE_LOGIN=true` + `ENABLE_PAYWALL=true`; wire
   planner proactive reminder LOOP + delivery channel; repurposer URL-ingestion (it currently
   takes pasted text, not URLs); monthly token-budget cap.
@@ -123,6 +175,7 @@ Bots · Content Studio · Lead Finder · Wan Video · Billing. Dev-bypass skips 
 - Confirmation before flipping any live flags.
 
 ## Context window note
-When this chat's context approaches ~70%, START A NEW CHAT, re-read notes/07 (this file) first,
-then run `git status`/`git log` and the agent-registry one-liner above. The handoff doc is the
-single source of continuity; keep it updated at each session boundary.
+When a chat's context approaches ~70–80%, START A NEW CHAT, re-read notes/07 (this file) first,
+then run `git status`/`git log` and the agent-registry one-liner above. This thread hit ~77% and
+was handed off this way. The handoff doc is the single source of continuity; keep it updated at
+each session boundary (append to "Recent changes" and refresh the bugs/next-steps as needed).

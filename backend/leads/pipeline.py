@@ -49,7 +49,7 @@ SCORING_MODEL = "or-llama33"       # economic tier: short structured scores from
 # ---------------------------------------------------------------------------
 # Stage 1: ICP clarification + search terms (panel Fusion)
 # ---------------------------------------------------------------------------
-def generate_icp(icp: ICPInput, llm: LLMClient) -> ICPResult:
+def generate_icp(icp: ICPInput, llm: LLMClient, mode: Optional[str] = None) -> ICPResult:
     context = _icp_context(icp)
     prompt = (
         "You are a B2B lead-generation strategist. Given a client's offer and the kind of "
@@ -66,11 +66,19 @@ def generate_icp(icp: ICPInput, llm: LLMClient) -> ICPResult:
         '{"clarified": str, "notes": str, "search_terms": [{"profile": str, "query": str, "why": str}]}'
     )
     messages = [{"role": "user", "content": prompt}]
+    # Honor a caller-requested mode (frontend quality/cost toggle) by using the
+    # matching Fusion preset; otherwise use the tuned quality panel.
+    if mode in ("high", "mixed", "economic"):
+        from backend.router import _FUSION_PRESETS
+        panel = _FUSION_PRESETS[mode]["panel"]
+        judge = _FUSION_PRESETS[mode]["judge"]
+    else:
+        panel, judge = ICP_FUSION_PANEL, ICP_FUSION_JUDGE
     text, _ = route(
         llm, messages,
         fusion=True,
-        panel=ICP_FUSION_PANEL,
-        judge=ICP_FUSION_JUDGE,
+        panel=panel,
+        judge=judge,
         temperature=0.6,
         max_tokens=2048,
     )
@@ -214,8 +222,8 @@ def score_leads(icp: ICPInput, leads: List[DiscoveredLead], llm: LLMClient) -> L
 # ---------------------------------------------------------------------------
 # Full run
 # ---------------------------------------------------------------------------
-def run_lead_finder(icp: ICPInput, llm: LLMClient) -> LeadRunResult:
-    icp_result = generate_icp(icp, llm)
+def run_lead_finder(icp: ICPInput, llm: LLMClient, mode: Optional[str] = None) -> LeadRunResult:
+    icp_result = generate_icp(icp, llm, mode=mode)
     leads = discover_and_audit(icp, icp_result.search_terms, llm)
     leads = score_leads(icp, leads, llm)
     return LeadRunResult(icp=icp_result, leads=leads)

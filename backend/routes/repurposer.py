@@ -37,6 +37,7 @@ def run(
     tone: str = Body("direct, pragmatic, no fluff"),
     audience: str = Body("general"),
     title: str = Body(""),
+    mode: str | None = None,
     user: User = Depends(get_current_user) if _settings.require_login else None,
     session: Session = Depends(get_session),
 ):
@@ -56,7 +57,7 @@ def run(
         f"ARTICLE / ESSAY:\n\"\"\"\n{article}\n\"\"\""
     )
 
-    text, _ti, _to, credits = run_agent(agent, user_msg, _llm, memory=None)
+    text, _ti, _to, credits = run_agent(agent, user_msg, _llm, memory=None, override_mode=mode)
 
     # Parse structured result (best-effort). Fall back to raw text if not JSON.
     try:

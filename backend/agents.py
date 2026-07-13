@@ -319,11 +319,17 @@ def run_agent(
     user_input: str,
     llm: LLMClient,
     memory: Optional[str] = None,
+    override_mode: Optional[str] = None,
+    override_model: Optional[str] = None,
 ) -> "tuple[str, int, int, int]":
     """Returns (text, tokens_in, tokens_out, credits_estimate).
 
     `memory` is an optional string of the user's learned preferences, injected so the
-    agent adapts over time (the learning layer)."""
+    agent adapts over time (the learning layer).
+    `override_mode` (high|mixed|economic) lets a caller (e.g. the frontend quality/cost
+    toggle) override the agent's default mode for non-pinned, non-fusion routing.
+    `override_model` (catalog id) temporarily swaps the agent's pinned model for this
+    call only (race-free) — used by the Content Studio to map its stage-2 model per mode."""
     messages: list[OpenAIChatMessage] = [
         {"role": "system", "content": agent.system_prompt},
     ]
@@ -333,19 +339,32 @@ def run_agent(
         )
     messages.append({"role": "user", "content": user_input})
     # Route through the fusion router. Priority:
-    #   1) explicit router_model pin (single model),
-    #   2) fusion panel + judge (multi-model),
-    #   3) mode-based single selection (high/mixed/economic).
-    from backend.router import route
+    #   1) explicit router_model pin (single model; override_model can swap it),
+    #   2) fusion panel + judge (multi-model; if override_mode is set, use that mode's
+    #      Fusion preset instead of the agent's tuned panel so the quality/cost toggle
+    #      is meaningful even for Fusion agents),
+    #   3) mode-based single selection (high/mixed/economic, overridable).
+    from backend.router import route, _FUSION_PRESETS
+
+    fusion = agent.fusion
+    panel = agent.fusion_panel
+    judge = agent.fusion_judge
+    goal = override_mode or agent.mode
+    if fusion and override_mode in _FUSION_PRESETS:
+        # User forced a quality/cost mode: swap to that mode's Fusion preset.
+        panel = _FUSION_PRESETS[override_mode]["panel"]
+        judge = _FUSION_PRESETS[override_mode]["judge"]
+
+    model_id = override_model or agent.router_model
 
     result, _used_id = route(
         llm,
         messages,
-        model_id=agent.router_model,
-        goal=agent.mode,
-        fusion=agent.fusion,
-        panel=agent.fusion_panel,
-        judge=agent.fusion_judge,
+        model_id=model_id,
+        goal=goal,
+        fusion=fusion,
+        panel=panel,
+        judge=judge,
     )
     # `result` is the model text. Estimate tokens from length (~4 chars/token) for the
     # credit cost; combined in/out approximated as the generated text length.

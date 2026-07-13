@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { api, getToken, setToken } from "./api.js";
+import { api, getToken, setToken, getMode, setMode } from "./api.js";
 
 const ALL_PLATFORMS = ["Instagram", "TikTok", "LinkedIn", "X", "YouTube", "Facebook"];
 
@@ -84,6 +84,14 @@ export function App() {
   );
 }
 
+// Global quality/cost mode shared by every agent call.
+const MODES = [
+  { id: "high", label: "Quality" },
+  { id: "mixed", label: "Balanced" },
+  { id: "economic", label: "Economic" },
+];
+
+
 function AuthScreen({ error, setError, onLogin, onRegister, busy }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -121,6 +129,7 @@ function Home({ user, setError, onBought, onLogout }) {
         <strong>Gadgents</strong>
         <span className="muted">credits: {user?.credits}</span>
         <span className="muted">plan: {user?.plan}</span>
+        <ModeToggle />
         <nav>
           <button className={tab === "bots" ? "active" : ""} onClick={() => setTab("bots")}>Bots</button>
           <button className={tab === "content" ? "active" : ""} onClick={() => setTab("content")}>Content Studio</button>
@@ -138,6 +147,27 @@ function Home({ user, setError, onBought, onLogout }) {
         {tab === "billing" && <Billing onBought={onBought} />}
       </main>
     </div>
+  );
+}
+
+function ModeToggle() {
+  const [mode, setLocal] = useState(getMode() || "mixed");
+  function pick(m) {
+    setLocal(m);
+    setMode(m === "mixed" ? null : m); // mixed = agent default, don't force
+  }
+  return (
+    <span className="mode-toggle" title="Quality vs cost for every agent call">
+      {MODES.map((m) => (
+        <button
+          key={m.id}
+          className={mode === m.id ? "chip active" : "chip"}
+          onClick={() => pick(m.id)}
+        >
+          {m.label}
+        </button>
+      ))}
+    </span>
   );
 }
 

@@ -35,6 +35,7 @@ def list_agents():
 def chat(
     agent_id: str,
     message: str = Body(..., embed=True),
+    mode: str | None = None,
     user: User = Depends(get_current_user) if _settings.require_login else None,
     session: Session = Depends(get_session),
 ):
@@ -45,7 +46,7 @@ def chat(
     if agent is None or not agent.production_ready:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
-    text, t_in, t_out, credits = run_agent(agent, message, _llm)
+    text, t_in, t_out, credits = run_agent(agent, message, _llm, override_mode=mode)
 
     remaining_credits = 0
     if _settings.enable_paywall and user is not None:

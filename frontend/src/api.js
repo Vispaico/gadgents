@@ -12,8 +12,25 @@ function authHeader() {
   return t ? { Authorization: `Bearer ${t}` } : {};
 }
 
+// Global quality/cost mode (null = agent default). Set by the header toggle.
+let _mode = null;
+export function setMode(m) {
+  _mode = m;
+}
+export function getMode() {
+  return _mode;
+}
+
+// Append the active mode as a query param (backend reads it from ?mode=).
+function withMode(path) {
+  if (!_mode) return path;
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}mode=${_mode}`;
+}
+
 async function req(method, path, body) {
-  const res = await fetch(`/api${path}`, {
+  const url = withMode(`/api${path}`);
+  const res = await fetch(url, {
     method,
     headers: { "Content-Type": "application/json", ...authHeader() },
     body: body ? JSON.stringify(body) : undefined,

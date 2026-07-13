@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlmodel import Session
 
@@ -15,11 +15,6 @@ _settings = get_settings()
 _llm = LLMClient()
 
 
-class ContentIn(BaseModel):
-    material: str
-    platforms: list[str]
-
-
 class ContentOut(BaseModel):
     prompts: str
     content: str
@@ -29,7 +24,9 @@ class ContentOut(BaseModel):
 
 @router.post("/content", response_model=ContentOut)
 def content(
-    payload: ContentIn,
+    material: str = Body(..., embed=True),
+    platforms: list[str] = Body(..., embed=True),
+    mode: str | None = None,
     user: User = Depends(get_current_user) if _settings.require_login else None,
     session: Session = Depends(get_session),
 ):
@@ -37,7 +34,7 @@ def content(
         user = None
     try:
         result = run_content_pipeline(
-            session, user, payload.material, payload.platforms, _llm
+            session, user, material, platforms, _llm, mode=mode
         )
     except InsufficientCredits as exc:
         raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=str(exc))
