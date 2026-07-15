@@ -9,7 +9,7 @@ venv/
 # Env / secrets
 .env
 .env.*
-!.env.example
+.env.example
 
 # Factory local config (per user provision)
 .factory/
