@@ -100,15 +100,14 @@ here too (pin Stage 3/4/5 to strong models in Quality mode for best result).
 - Assets render editable (so a human can tweak before publishing) — not just display.
 
 ## Open decisions for the next chat
-1. New **Editorial Studio** tab vs fold into Content Studio as a 4th output mode ("Editorial
-   Engine"). I lean NEW TAB (different enough; keeps Content Studio simple).
-2. Scope v1: include all 6 stages, or ship 1–3 + 5 first (Creator through Quality) and defer
-   Multiplier + Audience Intelligence? I lean ship 1–5, defer 6 + Audience Intel.
-3. BrandProfile: seed Vispaico default now, generic "untitled brand" fallback for other users?
-4. Persist assets as editable text in DB (yes) — confirm before building.
-5. The `content-repurposer` agent: EXTEND its system prompt to cover the new platforms/versions,
-   or create a separate `editorial-creator`? I lean separate (keeps repurposer as-is for the
-   existing Content Studio Repurpose mode).
+RESOLVED on 2026-07-15 (built; see notes/07 part 6):
+1. NEW TAB — Editorial Studio is its own nav tab, Content Studio untouched.
+2. Shipped STAGES 1-5; Multiplier is opt-in (checkbox), Audience Intelligence deferred.
+3. BrandProfile seeded: Vispaico default (link https://www.vispaico.com/en/aios) + generic
+   "Untitled Brand" fallback.
+4. Assets persist as editable text (EditorialAsset.content = JSON list of versions); PATCH
+   `/api/editorial/assets/{id}` edits them before publishing.
+5. Separate `editorial-creator` agent (repurposer left as-is for Content Studio Repurpose).
 
 ## Verification plan (when built)
 - Unit: mock LLM, assert IdeaBank JSON shape, asset row count = ideas×platforms×4.

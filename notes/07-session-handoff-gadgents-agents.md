@@ -429,4 +429,146 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
 - STATUS: DESIGNED ONLY. No code written yet. NOT built this session — user wanted the design +
   handoff before next chat. (.env still REQUIRE_LOGIN=false; backend not running.)
 
+## Session update (2026-07-15, part 6) — Editorial AI Studio BUILT (agent #6)
+- User said "build the Editorial Studio." Implemented the full multi-stage content engine from
+  notes/10 (designed last session). Decisions from notes/10 honored: NEW Editorial Studio tab
+  (NOT a 4th Content Studio mode); shipped STAGES 1-5 (Multiplier deferred behind a checkbox);
+  seeded Vispaico default + generic "Untitled Brand" fallback; assets persist as editable text.
+- `backend/db.py`: added models `BrandProfile, EditorialRun, IdeaBank, EditorialCalendar,
+  EditorialAsset, PromptTemplate` + `seed_editorial_defaults()` (idempotent; called from
+  `init_db()`). Verified `init_db()` creates all editorial tables and seeds Vispaico brand +
+  6 stage templates.
+- `backend/agents.py`: registered 6 editorial agents (idea_miner/strategist/creator/humanizer/
+  quality_director/multiplier). `idea_miner/strategist/humanizer/multiplier` pinned `or-opus`
+  (single strong model); `creator` + `quality_director` are Fusion (panel incl or-opus judge).
+  ALL `show_in_bots=False` (they power the Studio, not the Bots page). `list_production_agents()`
+  now returns 13 (8 core + 6 editorial).
+- `backend/editorial.py` (NEW): `run_editorial_pipeline()` stages 1-5 + optional 6: Idea Miner ->
+  Strategist (calendar, max_ideas = 4-12 selectable) -> per selected idea × per platform:
+  Creator -> Humanizer -> Quality Director. Brand voice injected via `_brand_block` (link +
+  voice + forbidden phrases, the `_instructions_block` pattern). Each stage reads its EDITABLE
+  prompt from `PromptTemplate` (falls back to agent default). Stage prompts use `route()` with
+  the quality/cost toggle (override_mode) so Quality/Balanced/Economic works here too. Assets
+  stored one row per (idea, platform), `quality_score` set by the Director. Fallback: if
+  Strategist returns no selection, top ideas by novelty+reach are used.
+- `backend/routes/editorial.py` (NEW): `POST /api/editorial/run` (essay, brand_id, platforms,
+  mode, max_ideas, run_multiplier), `GET /api/editorial/runs`, `GET /api/editorial/runs/{id}/
+  assets`, `PATCH /api/editorial/assets/{id}` (editable versions), `GET/PUT /api/editorial/
+  brands`, `GET/PUT /api/editorial/templates` (the editable prompt library surface). Dev-bypass
+  aware (uses synthetic dev user for history/edits). Registered in `app.py`.
+- Frontend: `api.js` gained `editorialRun/Runs/Assets/UpdateAsset/Brands/UpdateBrand/Templates/
+  UpdateTemplate`. `App.jsx` gained a new **Editorial Studio** nav tab + `EditorialStudio`
+  component (essay textarea, brand <select> defaulting to Vispaico, platform multiselect, max-
+  ideas selector, "Also run Multiplier" checkbox) + `AssetEditor` (editable 4-version cards,
+  save persists via PATCH). Per-asset "→ Repurpose" seeds Content Studio `material` (reuses the
+  studioSeed pattern). Results grouped by platform with quality-score badges.
+- Verified: backend imports + `init_db()` OK; TestClient on live app: `/api/config`,
+  `/api/editorial/brands` (Vispaico + Untitled), `/api/editorial/templates` (6 stages),
+  `/api/editorial/runs` ([]) all 200; empty essay rejected. Frontend `npm run build` passes.
+- NOT yet live-tested end-to-end (needs a real OpenRouter run). Known: the per-idea × platform
+  loop is N ideas × M platforms model calls — large essays + many platforms cost real credits;
+  recommend starting with max_ideas=4-6 + a few platforms. Multiplier is opt-in.
+- notes/10 status now BUILT (was DESIGNED ONLY). Its open decisions are all resolved as above.
+
+## Session update (2026-07-15, part 7) — Editorial Studio one-liner cap fixed
+- User asked about input/output limits. Found two real limits + one bug in `backend/editorial.py`:
+  * INPUT: essay stored truncated to `essay[:8000]` chars (sent whole to the miner); no
+    word/paragraph cap on the live prompt. `max_ideas` 4-12 (default 8) is the main cost knob.
+  * OUTPUT: per asset was hard-capped `final_versions[:4]` — correct for post/thread/carousel
+    (exactly 4 versions) but it SILENTLY CLIPPED the one-liner kinds (quotes=10, hooks=20,
+    questions=10, predictions=10) down to 4.
+- FIX: the `[:4]` cap now applies only to non-one-liner kinds. One-liner kinds keep their full
+  `_KIND_COUNTS` length (10/20/10/10). Implemented via `keep = _KIND_COUNTS.get(kind, 4) if kind
+  in _KIND_COUNTS else 4` then `stored_versions = final_versions[:keep]` (used for both the
+  `EditorialAsset.content` persist and the returned `versions`). The Creator stage already passes
+  `_KIND_COUNTS` to the model; now the persisted/sent asset matches that instruction.
+- Verified: `backend/editorial.py` compiles; TestClient routes `/api/editorial/{brands,templates,
+  runs}` still 200. No live run needed for this change.
+
+## Session update (2026-07-15, part 8) — FIX 422 on POST /api/editorial/run
+- User ran the Studio from the UI, got `422 Unprocessable Content` on `/api/editorial/run`.
+- ROOT CAUSE: the route used a single Pydantic model as the body param
+  (`body: EditorialRunIn`). FastAPI then wrapped it as an EMBEDDED body key `{"body": {...}}`,
+  so the frontend's FLAT JSON (`{essay, brand_id, platforms, mode, max_ideas, run_multiplier}`)
+  failed validation with `loc: ["body","body"]` "Field required". Same latent bug on
+  `PUT /brands/{id}` (`body: BrandIn`) and `PUT /templates/{stage}` (`body: TemplateIn`).
+- FIX: converted all three to flat scalar `Body(..., embed=True)` params, matching the proven
+  pattern in `backend/routes/pipeline.py` (which already uses flat embed params and works).
+  Removed the now-unused `EditorialRunIn` / `BrandIn` / `TemplateIn` model classes. The
+  frontend request shapes were already flat, so no frontend change was needed.
+- Verified: `POST /api/editorial/run` now returns 200 (pipeline executes; returns an empty run
+  in sandbox where there's no live LLM). `PUT /api/editorial/brands/{id}` and
+  `PUT /api/editorial/templates/{stage}` return 200. Frontend `npm run build` passes.
+
+## Session update (2026-07-15, part 9) — FIX "ran an essay, got 0 ideas · used 20 credits"
+- User ran a REAL essay, got `mined 0 ideas · selected 0 · 0 assets · used 20 credits` — paid
+  for nothing. Two REAL bugs (not the earlier 422):
+- BUG A (ROOT CAUSE, money-waster): `backend/editorial.py` `_run_stage` called `route(...)` with
+  NO `max_tokens`, so every stage inherited the router default of **2048** tokens. The Idea
+  Miner is asked for 25-50 ideas = a large JSON that's almost always >2048 tokens, so the reply
+  was TRUNCATED MID-JSON. `_safe_json` then failed → 0 ideas → the per-idea loop ran 0× → but
+  the idea_miner + strategist overhead stages already charged ~20 credits. Classic silent
+  charge-for-nothing. FIX: `_run_stage` now passes `max_tokens=8000` (verified 50-idea JSON ≈
+  2100 tokens, fits comfortably).
+- BUG B (why even 20 credits were wasted instead of erroring): the `idea_miner` `PromptTemplate`
+  row in `gadgents.db` was CORRUPTED — its `system_prompt` was the single character "x" (a stray
+  bad write during earlier dev). `_stage_system_prompt` returned that, so the real model got a
+  1-char system prompt and returned garbage. `seed_editorial_defaults` only INSERTED missing
+  rows (guarded `if None`), so it never repaired the bad row. FIX: `seed_editorial_defaults`
+  now UPSERTS — any existing template row whose `system_prompt` has < 50 chars is rewritten from
+  `_EDITORIAL_STAGE_PROMPTS` (version bumped). Re-run `init_db()` to repair existing bad DBs.
+- BUG C (also found, part of same audit): the Creator can return SEVERAL assets in ONE call
+  (e.g. linkedin + quotes together); the Humanizer/Quality Director echo ALL back, but the loop
+  took only `assets[0]` and applied it to every asset. So quotes (the 2nd asset) inherited
+  linkedin's 4 versions (one-liner fix from part 7 looked broken). FIX: added `_match_asset()`
+  that matches the reply to the current asset by platform+kind, falling back to index 0.
+- SAFETY NET: added a fail-fast guard in `run_editorial_pipeline` — if the Idea Miner yields 0
+  parseable ideas (truncated/garbage reply), the run is marked `failed` and raises BEFORE the
+  downstream stages, so it can never again charge for an empty run.
+- Verified end-to-end with a fake LLM: 8 ideas mined, 4 selected, 8 assets, quotes=10 / linkedin=4
+  (one-liner counts now correct), max_tokens=8000 reaching the model. The empty-ideas guard
+  raises when the miner returns garbage. Frontend `npm run build` passes. User should re-run
+  `./dev.sh` (init_db repairs the corrupt prompt row) then a real essay.
+
+## Session update (2026-07-15, part 10) — Export (.md/.pdf) + Made in HAIPHONG brand + Vispaico tuning
+- Two user requests before restarting dev: (1) an easy way to download Editorial Studio results
+  as Markdown and/or PDF; (2) add the "Made in HAIPHONG" ECMS brand rules and, where they improve
+  output, fold the better rules into Vispaico too.
+- EXPORT (frontend-only, zero new deps): `EditorialStudio` now builds a single Markdown doc from
+  `result` (`buildMarkdown()` — brand, idea/asset counts, multiplier IP, then each platform →
+  asset → all 4 versions) and offers two buttons: "↓ Download .md" (Blob download, automatic) and
+  "↓ Download .pdf" (opens a print-optimized window that triggers the browser's Save-as-PDF;
+  dependency-free, no PDF lib in the venv). `.pdf` needs a pop-up allowed; on block it shows a tip
+  to use the .md instead. Edit/saved versions are included, so the export reflects the human
+  edits. (No backend route needed.)
+- HAIPHONG BRAND: added `Made in HAIPHONG` to `seed_editorial_defaults` (default = False, no link
+  URL — the ECMS says only subtle references at most once). Its `voice_prompt` encodes the full
+  ECMS: Authority/Presence/Influence/Growth, "market rewards who's noticed/remembered/trusted",
+  calm/elegant/thoughtful tone, never promotional/loud/motivational, do-NOT-sell, angle-first
+  multiplication, one stand-alone "I've never considered it that way" moment per asset. Forbidden
+  phrases expanded to the ECMS list (unlock/leverage/secret/growth hack/dominate/scale fast/
+  disruptive/in the digital age/here's why/whether you're...).
+- SEED REFACTOR: brand seeding is now an UPSERT BY NAME (was: "only seed if no default brand
+  exists" — which silently skipped Haiphong because Vispaico already existed). `_brand_block`
+  (editorial.py) now also injects ANGLE-FIRST method guidance + ANTI-AI-TELL rules (no em-dash
+  overuse, no lists-of-three, no predictable transitions, vary structure, avoid LinkedIn/corp
+  cliches) for EVERY brand.
+- VISPAICO IMPROVEMENT (user asked "if rules would help, adapt"): YES — adopted the ECMS's
+  better rules. Vispaico `voice_prompt` rewritten to "confident, calm, founder-to-founder, never
+  promotional/loud, multiply value don't summarize"; `forbidden_phrases` extended with
+  unlock/secret/growth hack/dominate/crushing it/scale fast/disruptive/here's why/whether you're.
+  Result: Vispaico output is now calmer and less AI-flavored (same link still injected subtly).
+- ANGLE-FIRST WORKFLOW (the ECMS "secret sauce"): the Strategist stage prompt now scores each
+  idea by authority/originality/commercial (0-10) and RANKS strongest-first, returning a
+  `ranked` array; the per-idea creation loop already embodies angle-first (all platform variants
+  for one idea before the next). The `ranked` field is currently returned inside the calendar
+  JSON and accepted gracefully (pipeline reads `selected`/`calendar`); it's surfaced for future
+  UI use. This addresses the ECMS warning that generating all ~36 assets at once collapses quality.
+- SEED ALSO now SYNCs stage PromptTemplates from `_EDITORIAL_STAGE_PROMPTS` on every init_db()
+  (was: only repaired <50-char rows) so prompt improvements in code always propagate (version
+  bumped on change). Re-run `./dev.sh` to pick up the new brand + improved prompts.
+- Verified: `init_db()` seeds Vispaico + Untitled + Made in HAIPHONG (3 brands); Vispaico
+  forbidden now includes 'secret'; full pipeline run with Haiphong brand produces correct assets
+  (linkedin=4, quotes=10); backend compiles; `/api/editorial/brands` lists 3; frontend builds.
+
 ## Next steps (per original plan + where we are)

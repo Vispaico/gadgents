@@ -272,6 +272,214 @@ class Lead(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+# ===========================================================================
+# Editorial AI Studio (agent #6) state: a multi-stage content engine.
+# One run mines ideas from an essay, plans a calendar, then creates platform-native
+# assets (4 versions each) that are humanized + quality-scored. Brand voice is a
+# pluggable BrandProfile so the engine adapts to ANY brand, not just Vispaico.
+# The stage SYSTEM PROMPTS live in PromptTemplate (editable, no code edits to tune).
+# ===========================================================================
+class BrandProfile(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = ""
+    voice_prompt: str = ""          # free-text description of the brand voice/tone
+    link_url: str = ""              # the brand link to cite naturally
+    forbidden_phrases: str = ""     # comma/pipe separated phrases to never use
+    is_default: bool = False
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class EditorialRun(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    brand_id: int = Field(index=True)
+    essay_text: str = ""            # the source essay/empirical material
+    status: str = "running"         # running | done | failed
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class IdeaBank(SQLModel, table=True):
+    """Stage 1 output: the mined ideas for a run."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: int = Field(index=True)
+    ideas_json: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class EditorialCalendar(SQLModel, table=True):
+    """Stage 2 output: the selected ideas + 4-week calendar."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: int = Field(index=True)
+    calendar_json: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class EditorialAsset(SQLModel, table=True):
+    """Stages 3-5 output: one editable asset (one platform/idea combo), all versions
+    stored as JSON in `content`. Humanized + quality-scored per asset."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    run_id: int = Field(index=True)
+    idea_ref: str = ""              # which mined idea this came from (title/id)
+    platform: str = ""              # linkedin|facebook|instagram|x|newsletter|...|quotes|hooks|...
+    kind: str = ""                 # post|thread|carousel|quote|hook|question|prediction|...
+    content: str = ""              # JSON list of 1-4 version strings (the final, publish-ready text)
+    quality_score: int = 0         # 1-10, set by the Quality Director
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class PromptTemplate(SQLModel, table=True):
+    """The 6 editable stage SYSTEM PROMPTS. The only 'prompt library' piece — editable
+    without code changes. Seeded with defaults; the pipeline reads these if present."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    stage: str = ""                # idea_miner|strategist|creator|humanizer|quality_director|multiplier
+    version: int = 1
+    system_prompt: str = ""
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# Default stage system prompts (mirrored by the registered editorial agents, but
+# editable via /api/editorial/templates). Kept in sync with backend/agents.py.
+_EDITORIAL_STAGE_PROMPTS: dict[str, str] = {
+    "idea_miner": (
+        "You are the Editorial Idea Miner. Given a source essay or long text, extract 25-50 "
+        "distinct, publishable ideas. For each: a short title, a one-sentence summary, an "
+        "angle (controversial|useful|surprising|inspiring), and platform potentials (which "
+        "of: linkedin, facebook, instagram, x, newsletter, youtube_shorts, youtube_long, "
+        "podcast, quotes, hooks, questions, predictions it suits). Do NOT reference the "
+        "original essay in the idea text. Reply with a single JSON object: "
+        '{"ideas": [{"id": str, "title": str, "summary": str, "angle": str, '
+        '"platforms": [str], "novelty": 1-10, "reach": 1-10}]}. Valid JSON only.'
+    ),
+    "strategist": (
+        "You are the Editorial Strategist. Given an idea bank (JSON of mined ideas), apply an "
+        "ANGLE-FIRST workflow: read the ideas, score EACH by authority, originality, and "
+        "commercial relevance (0-10 each), then RANK them strongest-first. Pick the most "
+        "diverse, highest-scoring 6-12 ideas and lay out a 4-week publishing calendar that "
+        "covers them in ranked order (strongest angle first). Avoid overlap between angles. "
+        "Diversify platforms. Reply with a single JSON object: "
+        '{"selected": [idea_id...], "calendar": [{"week": 1-4, "idea_id": str, '
+        '"platform": str, "note": str}], "ranked": [{"idea_id": str, "authority": int, '
+        '"originality": int, "commercial": int}]}. Valid JSON only.'
+    ),
+    "creator": (
+        "You are the Editorial Creator. You are given ONE idea (title + summary + angle) and "
+        "must create platform-native assets for each requested platform, with EXACTLY 4 "
+        "distinct versions per platform, written as if created independently (never mention "
+        "the source essay). Types: linkedin/FB/IG = posts (IG as carousel slides), X = a "
+        "thread, newsletter = an issue, youtube_shorts = short scripts, youtube_long = 3-10min "
+        "video treatments, podcast = 2-host 1-5min outlines, quotes/hooks/questions/predictions "
+        "= the requested number of one-liners. Cite the brand link naturally where relevant, "
+        "but never hard-sell. Avoid the brand's forbidden phrases. Reply with a single JSON "
+        'object: {"assets": [{"platform": str, "kind": str, "versions": [str...]}]}. '
+        "Valid JSON only."
+    ),
+    "humanizer": (
+        "You are the Editorial Humanizer. Take assets (platform/kind + versions) and strip all "
+        "AI tells: repetitive rhythm, lazy cliches, corporate jargon, hedging, 'in conclusion'. "
+        "Keep meaning. Reply with a single JSON object of the SAME shape "
+        '{"assets": [{"platform": str, "kind": str, "humanized_versions": [str...]}]}. '
+        "Valid JSON only."
+    ),
+    "quality_director": (
+        "You are the Editorial Quality Director (a strict judge). Given humanized assets, score "
+        "EACH asset 1-10 across specificity, voice, hook strength, platform fit, and "
+        "no-AI-tells. If below 9.5, rewrite it to at least 9.5. Reply with a single JSON object: "
+        '{"assets": [{"platform": str, "kind": str, "quality_score": int, '
+        '"final_versions": [str...]}]}. Valid JSON only.'
+    ),
+    "multiplier": (
+        "You are the Editorial Multiplier. Given a run's created assets, propose 5-8 NEW pieces "
+        "of IP (essays, videos, talks, lead magnets) the brand could spin up next. Reply with a "
+        'single JSON object: {"ip": [{"title": str, "format": str, "why": str}]}. Valid JSON only.'
+    ),
+}
+
+
+def seed_editorial_defaults(session: Session) -> None:
+    """Idempotent seeding of editorial brand profiles + stage prompt templates.
+    Called from init_db. Safe to call repeatedly — brands are upserted by name and
+    stage prompts synced from the canonical source, so code changes propagate."""
+    # Brand profiles upserted by name (so adding HAIPHONG doesn't depend on the
+    # default brand being absent).
+    EDITORIAL_BRANDS = [
+        BrandProfile(
+            name="Vispaico",
+            voice_prompt=(
+                "Confident, calm, founder-to-founder. No hype, no jargon, never promotional or loud. "
+                "Teaches the reader something genuinely useful about AI operating systems and "
+                "agentic workflows, then lets the product speak for itself. Write like a senior "
+                "operator with a point of view, not a marketer growing followers. Never simply "
+                "summarize — multiply the essay's value into original pieces others will want to share."
+            ),
+            link_url="https://www.vispaico.com/en/aios",
+            forbidden_phrases=(
+                "game-changer|revolutionary|cutting-edge|leverage synergy|in today's fast-paced world|"
+                "unlock|secret|growth hack|dominate|crushing it|scale fast|disruptive|here's why|"
+                "whether you're"
+            ),
+            is_default=True,
+        ),
+        BrandProfile(
+            name="Made in HAIPHONG",
+            voice_prompt=(
+                "You are the Chief Content Strategist for Made in HAIPHONG, a premium strategic "
+                "consultancy that helps ambitious companies become the obvious choice through "
+                "Authority, Presence, Influence and Growth. The market rarely rewards the best "
+                "company; it rewards the one people notice, remember and trust. Calm, elegant, "
+                "thoughtful, confident, intelligent, measured, sophisticated. Never promotional, "
+                "never loud, never motivational, never 'LinkedIn influencer', never 'marketing guru'. "
+                "Do NOT sell or pitch; authority is built through ideas. Reference Made in HAIPHONG "
+                "at most once, only if natural. Multiply the essay's commercial and intellectual "
+                "value into original content; never just shorten it. Every asset must stand alone "
+                "and create one moment where the reader thinks 'I've never considered it that way.'"
+            ),
+            link_url="",
+            forbidden_phrases=(
+                "game-changer|revolutionary|unlock|leverage|secret|growth hack|crushing it|dominate|"
+                "scale fast|disruptive|in today's world|in the digital age|here's why|whether you're|"
+                "in today's fast-paced world"
+            ),
+            is_default=False,
+        ),
+        BrandProfile(
+            name="Untitled Brand",
+            voice_prompt="Clear, helpful, native to each platform. Match the source voice; do not invent facts.",
+            link_url="",
+            forbidden_phrases="",
+            is_default=False,
+        ),
+    ]
+    for b in EDITORIAL_BRANDS:
+        existing = session.exec(select(BrandProfile).where(BrandProfile.name == b.name)).first()
+        if existing is None:
+            session.add(b)
+        else:
+            existing.voice_prompt = b.voice_prompt
+            existing.link_url = b.link_url
+            existing.forbidden_phrases = b.forbidden_phrases
+            # Only set is_default from the seed for the Vispaico entry; never unset a
+            # user's chosen default.
+            if b.is_default:
+                existing.is_default = True
+            session.add(existing)
+    session.commit()
+
+    for stage, prompt in _EDITORIAL_STAGE_PROMPTS.items():
+        existing = session.exec(select(PromptTemplate).where(PromptTemplate.stage == stage)).first()
+        if existing is None:
+            session.add(PromptTemplate(stage=stage, version=1, system_prompt=prompt))
+        elif existing.system_prompt.strip() != prompt.strip():
+            # Always sync the stage prompt from the canonical source so prompt improvements
+            # in code propagate on the next init_db(). (Also repairs any short/corrupt row.)
+            existing.system_prompt = prompt
+            existing.version += 1
+            session.add(existing)
+    try:
+        session.commit()
+    except Exception:
+        session.rollback()
+
+
 engine = None
 
 
@@ -288,6 +496,9 @@ def get_engine() -> "create_engine":
 
 def init_db() -> None:
     SQLModel.metadata.create_all(get_engine())
+    # Idempotent seed of editorial defaults (brand profiles + stage prompt templates).
+    with Session(get_engine()) as _seed_session:
+        seed_editorial_defaults(_seed_session)
 
 
 def get_session():

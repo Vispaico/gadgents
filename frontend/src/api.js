@@ -67,5 +67,16 @@ export const api = {
   wanRun: (source_image, concept, format_kind = "", title = "") =>
     req("POST", "/wan/run", { source_image, concept, format_kind, title }),
   wanBriefs: () => req("GET", "/wan/briefs"),
+  editorialRun: (essay, brand_id, platforms = [], mode = null, max_ideas = 8, run_multiplier = false) =>
+    req("POST", "/editorial/run", { essay, brand_id, platforms, mode, max_ideas, run_multiplier }),
+  editorialRuns: () => req("GET", "/editorial/runs"),
+  editorialAssets: (runId) => req("GET", `/editorial/runs/${runId}/assets`),
+  editorialUpdateAsset: (assetId, versions) =>
+    req("PATCH", `/editorial/assets/${assetId}`, { versions }),
+  editorialBrands: () => req("GET", "/editorial/brands"),
+  editorialUpdateBrand: (brandId, body) => req("PUT", `/editorial/brands/${brandId}`, body),
+  editorialTemplates: () => req("GET", "/editorial/templates"),
+  editorialUpdateTemplate: (stage, system_prompt) =>
+    req("PUT", `/editorial/templates/${stage}`, { system_prompt }),
   config: () => req("GET", "/config"),
 };

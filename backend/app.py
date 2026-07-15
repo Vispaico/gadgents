@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import get_settings
 from backend.db import init_db
-from backend.routes import agents, auth, billing, pipeline, router as router_routes, planner, leadfinder, wan, social
+from backend.routes import agents, auth, billing, pipeline, router as router_routes, planner, leadfinder, wan, social, editorial
 from backend.routes.agents import close_llm
 from backend.routes.router import close_router_llm
 from backend.routes.planner import close_planner_llm
@@ -45,6 +45,7 @@ app.include_router(planner.router)
 app.include_router(leadfinder.router)
 app.include_router(wan.router)
 app.include_router(social.router)
+app.include_router(editorial.router)
 
 
 @app.get("/health")

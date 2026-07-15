@@ -315,6 +315,86 @@ agent(
 )
 
 
+# ---------------------------------------------------------------------------
+# Agent #6: Editorial AI Studio — a staged content engine (NOT a single chat agent).
+#   From one essay it mines ideas -> plans a calendar -> creates platform-native
+#   assets (4 versions each) -> humanizes -> quality-scores. Brand voice is a
+#   pluggable BrandProfile (adapts to any brand, default = Vispaico). The 6 stage
+#   SYSTEM PROMPTS live in PromptTemplate (editable), mirrored here as the agents'
+#   defaults. show_in_bots=False: the stages power the Editorial Studio tab, and are
+#   orchestrated by backend/editorial.py, not surfaced as bare chat bots.
+# ---------------------------------------------------------------------------
+from backend.db import _EDITORIAL_STAGE_PROMPTS
+
+agent(
+    id="editorial-idea-miner",
+    name="Editorial Idea Miner",
+    description="Extracts 25-50 publishable ideas (with angles + platform fit) from a source essay.",
+    system_prompt=_EDITORIAL_STAGE_PROMPTS["idea_miner"],
+    base_credits=10,
+    router_model="or-opus",  # strong single model; no Fusion needed for mining
+    show_in_bots=False,
+)
+
+agent(
+    id="editorial-strategist",
+    name="Editorial Strategist",
+    description="Picks the best, most diverse ideas and lays out a 4-week publishing calendar.",
+    system_prompt=_EDITORIAL_STAGE_PROMPTS["strategist"],
+    base_credits=8,
+    router_model="or-opus",
+    show_in_bots=False,
+)
+
+agent(
+    id="editorial-creator",
+    name="Editorial Creator",
+    description="For ONE idea, creates platform-native assets (LinkedIn/FB/IG/X/Newsletter/YT Shorts/Long/Podcast + Quotes/Hooks/Questions/Predictions), 4 versions each.",
+    system_prompt=_EDITORIAL_STAGE_PROMPTS["creator"],
+    base_credits=12,
+    fusion=True,
+    fusion_panel=["or-opus", "or-ds-pro", "oa-sol", "or-sonnet46"],
+    fusion_judge="or-opus",
+    router_model=None,
+    mode="high",
+    show_in_bots=False,
+)
+
+agent(
+    id="editorial-humanizer",
+    name="Editorial Humanizer",
+    description="Strips AI tells (rhythm, cliches, jargon) from each created asset, keeping meaning.",
+    system_prompt=_EDITORIAL_STAGE_PROMPTS["humanizer"],
+    base_credits=8,
+    router_model="or-opus",
+    show_in_bots=False,
+)
+
+agent(
+    id="editorial-quality-director",
+    name="Editorial Quality Director",
+    description="Scores each asset 1-10 across 14 dimensions; rewrites until it hits >=9.5.",
+    system_prompt=_EDITORIAL_STAGE_PROMPTS["quality_director"],
+    base_credits=10,
+    fusion=True,
+    fusion_panel=["or-opus", "or-sonnet46", "or-ds-pro"],
+    fusion_judge="or-opus",
+    router_model=None,
+    mode="high",
+    show_in_bots=False,
+)
+
+agent(
+    id="editorial-multiplier",
+    name="Editorial Multiplier",
+    description="Proposes new IP (essays, videos, talks, lead magnets) the brand can spin up next from a finished run.",
+    system_prompt=_EDITORIAL_STAGE_PROMPTS["multiplier"],
+    base_credits=8,
+    router_model="or-opus",
+    show_in_bots=False,
+)
+
+
 def list_production_agents() -> list[AgentDef]:
     """Agents currently exposed to the frontend / API."""
     return [a for a in REGISTRY.values() if a.production_ready]
