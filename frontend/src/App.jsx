@@ -124,6 +124,7 @@ function AuthScreen({ error, setError, onLogin, onRegister, busy }) {
 function Home({ user, setError, onBought, onLogout }) {
   const [tab, setTab] = useState("bots");
   const [wanSeed, setWanSeed] = useState("");  // concept passed from Content Studio -> Wan tab
+  const [studioSeed, setStudioSeed] = useState("");  // post text passed from Social Listen -> Content Studio
   return (
     <div className="app">
       <header>
@@ -134,6 +135,7 @@ function Home({ user, setError, onBought, onLogout }) {
         <nav>
           <button className={tab === "bots" ? "active" : ""} onClick={() => setTab("bots")}>Bots</button>
           <button className={tab === "content" ? "active" : ""} onClick={() => setTab("content")}>Content Studio</button>
+          <button className={tab === "social" ? "active" : ""} onClick={() => setTab("social")}>Social Listen</button>
           <button className={tab === "leads" ? "active" : ""} onClick={() => setTab("leads")}>Lead Finder</button>
           <button className={tab === "wan" ? "active" : ""} onClick={() => setTab("wan")}>Wan Video</button>
           <button className={tab === "billing" ? "active" : ""} onClick={() => setTab("billing")}>Billing</button>
@@ -150,6 +152,13 @@ function Home({ user, setError, onBought, onLogout }) {
           />
         )}
         {tab === "leads" && <LeadFinder user={user} setError={setError} />}
+        {tab === "social" && (
+          <SocialListen
+            user={user}
+            setError={setError}
+            onRepurpose={(text) => { setStudioSeed(text); setTab("content"); }}
+          />
+        )}
         {tab === "wan" && <WanVideo user={user} setError={setError} seed={wanSeed} />}
         {tab === "billing" && <Billing onBought={onBought} />}
       </main>
@@ -257,27 +266,56 @@ const CONTENT_OUTPUTS = [
   { id: "repurpose", label: "Repurpose / Summarize", desc: "Multi-platform + media suggestions + short-video script" },
 ];
 
-function ContentStudio({ user, setError, onSendToWan }) {
-  const [material, setMaterial] = useState("");
+function ContentStudio({ user, setError, onSendToWan, seed = "" }) {
+  const [material, setMaterial] = useState(seed);
+  const [urls, setUrls] = useState("");
+  const [instructions, setInstructions] = useState("");
   const [platforms, setPlatforms] = useState(["Instagram", "TikTok"]);
   const [output, setOutput] = useState("content");
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [past, setPast] = useState([]);
+  const [openBrief, setOpenBrief] = useState(null);
+
+  async function openBriefById(id) {
+    try {
+      setOpenBrief(await api.pipelineBrief(id));
+    } catch (e) {
+      setErr(e.message);
+    }
+  }
 
   function toggle(p) {
     setPlatforms((cur) => (cur.includes(p) ? cur.filter((x) => x !== p) : [...cur, p]));
   }
 
+  // Allow either splitting on whitespace/newlines or recognizing a single URL.
+  function parseUrls() {
+    return urls
+      .split(/[\s,]+/)
+      .map((u) => u.trim())
+      .filter(Boolean);
+  }
+
+  async function loadPast() {
+    try {
+      setPast(await api.pipelineBriefs());
+    } catch {
+      setPast([]);
+    }
+  }
+
   async function run() {
-    if (!material.trim()) return;
+    if (!material.trim() && !urls.trim() && !instructions.trim()) return;
     setBusy(true);
     setErr("");
     setResult(null);
     try {
-      const res = await api.pipeline(material, platforms, output);
+      const res = await api.pipeline(material, platforms, output, parseUrls(), instructions);
       setResult(res);
       user.credits = res.remaining_credits;
+      if (output === "repurpose") loadPast();
     } catch (e) {
       setErr(e.message);
     } finally {
@@ -285,17 +323,35 @@ function ContentStudio({ user, setError, onSendToWan }) {
     }
   }
 
+  useEffect(() => {
+    if (output === "repurpose") loadPast();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <div className="studio">
       <h2>Content Studio</h2>
       <p className="muted">
-        Paste an article, image notes or video idea. Pick an output, choose platforms, generate.
+        Paste an article, image notes or video idea — or drop in URLs/links and we'll read
+        them. Pick an output, choose platforms, generate.
       </p>
       <textarea
         className="big"
         value={material}
         placeholder="Paste your source material or idea here…"
         onChange={(e) => setMaterial(e.target.value)}
+      />
+      <textarea
+        className="big"
+        value={urls}
+        placeholder="Optional: paste article/blog URLs (one per line or space-separated) to read and repurpose…"
+        onChange={(e) => setUrls(e.target.value)}
+      />
+      <textarea
+        className="big"
+        value={instructions}
+        placeholder="Optional: instructions / style notes the model must follow (e.g. 'keep the warehouse metaphor', 'tone: confident, target CTOs', 'rewrite in your own words, avoid plagiarism')…"
+        onChange={(e) => setInstructions(e.target.value)}
       />
 
       <div className="output-modes">
@@ -344,6 +400,153 @@ function ContentStudio({ user, setError, onSendToWan }) {
             </>
           )}
           <p className="muted">used {result.credits_used} credits · {result.remaining_credits} left</p>
+        </div>
+      )}
+      {output === "repurpose" && past.length > 0 && (
+        <div className="result">
+          <h3>Past Repurpose runs</h3>
+          {openBrief ? (
+            <div className="brief-detail">
+              <button className="link" onClick={() => setOpenBrief(null)}>← Back to runs</button>
+              <h3>{openBrief.title}</h3>
+              <p className="muted">{openBrief.channels || "all channels"} · {openBrief.created_at}</p>
+              <pre>{openBrief.brief_json || "(no brief)"}</pre>
+              {openBrief.outputs.map((o, i) => (
+                <div key={i} className="card">
+                  <span className="badge">{o.channel}</span>
+                  <pre>{o.content_json}</pre>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="grid">
+              {past.map((b) => (
+                <div
+                  className="card click"
+                  key={b.id}
+                  onClick={() => openBriefById(b.id)}
+                >
+                  <h3>{b.title}</h3>
+                  <p className="muted">{b.channels || "all channels"} · {b.created_at}</p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SocialListen({ user, setError, onRepurpose }) {
+  const [topic, setTopic] = useState("");
+  const [platforms, setPlatforms] = useState(["x"]);
+  const [posts, setPosts] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [queries, setQueries] = useState([]);
+
+  function toggle(p) {
+    setPlatforms((cur) => (cur.includes(p) ? cur.filter((x) => x !== p) : [...cur, p]));
+  }
+
+  async function loadQueries() {
+    try {
+      setQueries(await api.socialQueries());
+    } catch {
+      setQueries([]);
+    }
+  }
+
+  useEffect(() => {
+    loadQueries();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function run() {
+    if (!topic.trim()) return;
+    setBusy(true);
+    setErr("");
+    setPosts([]);
+    try {
+      const res = await api.socialListen(topic, platforms, 20);
+      // Already sorted by likes desc server-side; re-sort client-side to be safe.
+      const sorted = [...res.posts].sort((a, b) => (b.like_count || 0) - (a.like_count || 0));
+      setPosts(sorted);
+      loadQueries();
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function repurpose(post) {
+    const header = `Source (${post.platform}${post.author ? " @" + post.author : ""}):\n`;
+    onRepurpose(header + post.text);
+  }
+
+  return (
+    <div className="studio">
+      <h2>Social Listen</h2>
+      <p className="muted">
+        Pull posts by topic from X / LinkedIn (via CloakBrowser) and sort by engagement.
+        Repurpose any post straight into Content Studio.
+      </p>
+      <input
+        value={topic}
+        placeholder="Topic or #hashtag (e.g. 'ai agents' or '#founder')"
+        onChange={(e) => setTopic(e.target.value)}
+      />
+      <div className="chips">
+        {["x", "linkedin"].map((p) => (
+          <button
+            key={p}
+            className={platforms.includes(p) ? "chip active" : "chip"}
+            onClick={() => toggle(p)}
+          >
+            {p === "x" ? "X" : "LinkedIn"}
+          </button>
+        ))}
+      </div>
+      <button disabled={busy || !topic.trim()} onClick={run}>
+        {busy ? "Listening…" : "Listen"}
+      </button>
+      {err && <div className="error">{err}</div>}
+      {posts.length > 0 && (
+        <div className="result">
+          <h3>Posts by engagement ({posts.length})</h3>
+          <div className="grid">
+            {posts.map((post, i) => (
+              <div className="card" key={i}>
+                <span className="badge">{post.platform}</span>
+                {post.author && <span className="muted"> · {post.author}</span>}
+                <p>{post.text}</p>
+                <p className="muted">
+                  ♥ {post.like_count} · ↻ {post.repost_count} · 💬 {post.reply_count}
+                </p>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {post.url && (
+                    <a className="link" href={post.url} target="_blank" rel="noreferrer">View ↗</a>
+                  )}
+                  <button className="link" onClick={() => repurpose(post)}>→ Repurpose</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {queries.length > 0 && (
+        <div className="result">
+          <h3>Past listens</h3>
+          <div className="grid">
+            {queries.map((q) => (
+              <div className="card" key={q.id}>
+                <h3>{q.topic}</h3>
+                <p className="muted">{q.platforms} · {q.created_at}</p>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>

@@ -196,6 +196,71 @@ Bots · Content Studio · Lead Finder · Wan Video · Billing. Dev-bypass skips 
   If user wants Repurpose runs saved to history, route the pipeline repurpose through
   repurposer.py instead of calling the agent inline.
 
+## Session update (2026-07-14) — Content Studio now accepts URLs/links
+- User asked: in Content Studio, allow pasting article/blog URLs so the model reads + repurposes
+  (or rewrites plagiarism-free / creates Content+Media posts) from link content, not just pasted text.
+- Added `backend/url_reader.py` (new): `read_urls(urls)` reuses existing web-fetch building blocks
+  from `backend/leads/discovery` — Firecrawl markdown via `_fc_scrape` when configured/reachable,
+  else plain HTTP `_request` + BeautifulSoup fallback (strips scripts/style/chrome). Public-web only,
+  GDPR-safe. Caps 12k chars/URL, 40k total to protect prompt context. Prepend "=== Content read from
+  the provided URLs ===" block to the material.
+- Wiring: `run_content_pipeline` gained `urls: list[str]` param; `routes/pipeline.py` accepts
+  `urls: list[str] = Body([])`; frontend `ContentStudio` has a 2nd textarea for URLs (one per line or
+  space/comma separated, `parseUrls()`), run() passes them. Works for ALL three output modes
+  (prompts/content/repurpose). `api.pipeline` signature updated.
+- Verified: backend imports ok; `read_urls(['https://example.com'])` returns 178 chars of readable
+  text via the HTTP fallback (Firecrawl not up). Frontend `npm run build` passes.
+- NOTE: URLs are appended to material and the LLM is instructed (via existing agent prompts) to
+  preserve source voice / not invent facts; "rewrite free of plagiarism" is a property of the agent
+  prompts (no explicit anti-plagiarism step). Good enough for the use case; could add an explicit
+  "rewrite in your own words" instruction later if needed.
+
+## Session update (2026-07-14, part 2) — dedicated Instructions field in Content Studio
+- User confirmed: add a SEPARATE "Instructions / style notes" input (so guidance isn't mixed into
+  the source material field and misread as text to preserve). Added `instructions` textarea in
+  `ContentStudio` (optional, below URLs). Run triggers if material OR urls OR instructions is filled.
+- Backend: `run_content_pipeline` + `routes/pipeline.py` accept `instructions: str`. Injected into
+  stage-1, stage-2 AND repurpose prompts as a clearly labeled block:
+  "EXPLICIT INSTRUCTIONS (you MUST follow these, they are not source content)" so the model treats
+  it as commands. `api.pipeline` signature updated to pass it.
+- Verified: frontend `npm run build` passes; backend (pipeline + routes) imports ok.
+- Handoff continuity: always append session updates here at each boundary so a fresh chat can resume.
+
+## Session update (2026-07-14, part 3) — Repurpose persistence history wired up
+- User asked to wire the repurposer persistence history (Studio Repurpose mode was ephemeral;
+  the old `/api/repurposer/run` + `/briefs` route still persisted but was orphaned/no longer called).
+- Decisions: (1) persist in dev-bypass mode under a synthetic dev-user so history works NOW;
+  (2) REMOVE the orphaned repurposer route entirely, fold persistence into the pipeline;
+  (3) parse repurposer JSON into per-channel ContentOutput rows (rich history).
+- Backend changes:
+  * `backend/db.py`: added `get_or_create_dev_user(session)` (synthetic `__dev__@gadgents.local`,
+    only created in bypass mode) so history persists without a real login.
+  * `backend/pipeline.py`: imports ContentBrief/ContentOutput/get_or_create_dev_user; added
+    `_resolve_user()` (real or synthetic dev user) and `_persist_repurpose()` (parses JSON, writes
+    ContentBrief + per-channel ContentOutput for posts + script + media_suggestions). Repurpose
+    branch now persists + returns `brief_id`.
+  * `backend/routes/pipeline.py`: `ContentOut` gained `brief_id`; added `GET /api/pipeline/briefs`
+    (lists user's or synthetic dev user's briefs, newest first).
+  * `backend/routes/repurposer.py`: DELETED (orphaned). Removed from `app.py` (router include +
+    lifespan close). `close_repurposer_llm` no longer referenced anywhere (verified).
+- Frontend changes:
+  * `api.js`: added `pipelineBriefs()`. `ContentStudio` now has `past` state, loads briefs on mount
+    (when in repurpose mode) and after a repurpose run, and renders a "Past Repurpose runs" grid.
+- Verified: `npm run build` passes. Backend imports ok. Direct unit test (mocked repurposer JSON)
+  created 1 ContentBrief + 4 ContentOutput rows (linkedin, instagram, media, script) with dev user.
+  Live boot: `/api/config`, `/api/pipeline/briefs` both respond (empty list initially, fills after runs).
+
+## Session update (2026-07-14, part 4) — Repurpose history cards are clickable
+- User asked to make the "Past Repurpose runs" cards open their stored content.
+- Backend: added `GET /api/pipeline/briefs/{brief_id}` returning the brief + all its
+  ContentOutput rows (channel, content_json, model). 404 if missing or not the user's.
+  Imported ContentOutput into the route.
+- Frontend: `api.pipelineBrief(id)`; `ContentStudio` tracks `openBrief`; history cards are
+  clickable (`openBriefById`), showing a detail view (brief_json + per-output cards w/ channel
+  badge + "← Back to runs"). Added `.brief-detail` CSS.
+- Verified: frontend build passes; backend (routes.pipeline, app) imports ok. Live boot returns
+  [] for list and 404 for unknown brief id.
+
 ## Next steps (per original plan + where we are)
 - PER-AGENT TUNING (in progress): adjust `router_model` pins / `mode` / Fusion usage per
   agent. DONE FIRST: Content Studio per-mode mapping (see Recent changes). Still to do / user
@@ -225,3 +290,143 @@ When a chat's context approaches ~70–80%, START A NEW CHAT, re-read notes/07 (
 then run `git status`/`git log` and the agent-registry one-liner above. This thread hit ~77% and
 was handed off this way. The handoff doc is the single source of continuity; keep it updated at
 each session boundary (append to "Recent changes" and refresh the bugs/next-steps as needed).
+
+## Session update (2026-07-14, part 5) — social-listener agent (CloakBrowser) scoped
+- User wants an agent that pulls posts from X + LinkedIn by topic, sorts by engagement
+  (likes/reach), and offers one-click repurpose into Content Studio. Accepted CloakBrowser
+  despite ToS/ban risk; chose "discuss more, don't build yet" then clarified **reach sort is
+  NOT important** (only likes/engagement matters) -> removes the one hard constraint.
+- CORRECTION to older handoff line "CloakBrowser = overkill/ToS risk": it is NOT overkill;
+  it's the correct stealth-Chromium (Playwright drop-in, 66 source-level fingerprint patches,
+  passes Cloudflare/FingerprintJS/BrowserScan). Overkill half was wrong. ToS risk remains real
+  but comes from the *action* (reading another platform's posts via authenticated session),
+  not the tool. Target: `pip install cloakbrowser[geoip]`, persistent logged-in profile,
+  `humanize=True`, residential proxy. NOTE macOS stuck on older free v146 build; v148+ needs Pro sub.
+- Engagement reachability via scraping: X likes/retweets/replies ARE in DOM (sortable). LinkedIn
+  gives likes at best (impressions/reach are author-only, never in DOM). With "reach not needed",
+  X is fully sortable; LinkedIn = likes-sort-with-caveat (higher ban risk even with stealth).
+- Planned architecture (NOT yet built):
+  * `backend/social/` module: CloakBrowser client wrapper (topic query -> rendered DOM ->
+    SocialPost extraction); `SocialQuery` + `SocialPost` DB models (platform, author, text,
+    like_count, repost_count, reply_count, url, query_id) following ContentBrief/ContentOutput pattern.
+  * Frontend: new "Social Listen" tab — topic input, X/LinkedIn toggle, sorted feed, per-post
+    "Repurpose" button seeding Content Studio `material` (reuse Wan-tab seed pattern).
+  * Content Studio reuse is trivial: it already accepts `material`; a repurposed post == material.
+- Status: SCOPED ONLY. No code written yet. Awaiting user go-ahead to scaffold `backend/social/`.
+
+## Session update (2026-07-14, part 6) — social-listener agent BUILT
+- User said "build it, then update the handoff." Implemented the full agent #5.
+- `backend/db.py`: added `SocialQuery` (user_id, topic, platforms csv, created_at) and
+  `SocialPost` (query_id, user_id, platform, author, text, like_count, repost_count,
+  reply_count, url). `init_db()` creates them (verified).
+- `backend/config.py`: added `cloakbrowser_license_key`, `social_proxy`,
+  `social_profile_dir` (CloakBrowser session/profile/proxy config).
+- `backend/social/__init__.py` (NEW): CloakBrowser client. `cloakbrowser` is a LAZY import
+  (only when a listen runs) so the app boots without it. `listen_x`/`listen_linkedin` parse
+  rendered DOM via BeautifulSoup; `_parse_count` handles 1.2K/3.4M; results sorted by likes
+  desc. Listener failures surface as one "[scrape failed: ...]" post (UI-warns, doesn't crash).
+  `listen(platforms, topic, limit)` merges + platform-tags + sorts.
+- `backend/routes/social.py` (NEW): `POST /api/social/listen` (persists query + posts, returns
+  posts), `GET /api/social/queries`, `GET /api/social/queries/{id}/posts` (sorted by likes).
+  Uses `get_or_create_dev_user` so history works in dev-bypass. Registered in `app.py`.
+- Frontend: `api.socialListen/socialQueries/socialPosts`; new **Social Listen** nav tab;
+  `SocialListen` component (topic input, X/LinkedIn toggle, engagement-sorted feed with
+  like/repost/reply counts + View/Repurpose links, Past listens grid). Per-post "→ Repurpose"
+  seeds Content Studio `material` (reuses the seed pattern; `Home` gained `studioSeed` state,
+  `ContentStudio` accepts `seed`). Same pattern already used for Wan `wanSeed`.
+- Verified: frontend `npm run build` passes; backend (app, routes.social, db init) all ok;
+  `GET /api/social/queries` returns 200 `[]` via TestClient with no cloakbrowser installed.
+- NOT YET TESTED LIVE: actual X/LinkedIn scraping needs cloakbrowser installed + a real
+  logged-in persistent profile in `social_profile_dir` + (recommended) a residential
+  `social_proxy`. macOS is on free v146 build; v148+ needs Pro `cloakbrowser_license_key`.
+- REMINDER for next chat: do not run a real listen without a configured profile; it will fail
+  gracefully (lazy ImportError surfaced as a failed post).
+
+## Session update (2026-07-15) — social-listener setup docs added
+- User asked for a README/setup note for the CloakBrowser profile. Added:
+  * `notes/08-social-listener-setup.md` — install (`pip install cloakbrowser[geoip]`), how to
+    seed a persistent logged-in profile (headed launch + manual login, or copy a Chrome profile),
+    `.env` keys (SOCIAL_PROFILE_DIR / SOCIAL_PROXY / CLOAKBROWSER_LICENSE_KEY), run/verify,
+    ToS+ban-risk callout, and the 3 endpoints.
+  * `.env.example`: documented the three SOCIAL_*/CLOAKBROWSER_* keys with comments (free v146 vs
+    Pro v148+ builds; macOS on free build).
+- No code changes. Both docs match existing conventions (notes/ numbered, .env.example key order).
+
+## Session update (2026-07-15, part 2) — CloakBrowser wired + X listener WORKING live
+- User installed cloakbrowser and we seeded a logged-in profile. Two bugs found + fixed:
+  * `_build_browser`/`seed_social_profile.py` used `launch(user_data_dir=...)` -> TypeError.
+    CloakBrowser needs `launch_persistent_context(user_data_dir=...)` (returns a BrowserContext;
+    use `ctx.new_page()`, `ctx.close()`). FIXED in `backend/social/__init__.py` + seeder.
+  * `goto(wait_until="networkidle")` timed out on X/LinkedIn (they never idle). Changed to
+    `domcontentloaded` + settle in `_wait_and_scrape` and the seeder.
+  * X engagement parser was wrong (looked for data-testid metric divs). X now puts everything in
+    ONE aria-label per tweet: "49 replies, 222 reposts, 1827 likes, 4722 bookmarks, 357078 views".
+    FIXED `listen_x` to regex that aria-label for likes/reposts/replies.
+- Verified LIVE: saved profile is logged in (X home renders, no "Log in"); `listen_x('ai agents')`
+  returns real posts with correct authors + status URLs; likes parse (e.g. 6649, 1830, 476) and
+  sort desc; end-to-end `POST /api/social/listen` -> 200, query persisted, `GET /api/social/queries`
+  -> 200. LinkedIn listener code exists but NOT yet live-tested (needs a confirmed LinkedIn
+  session in the same profile; LinkedIn DOM parsing is best-effort via aria-label "like|reaction").
+- `.env` now has SOCIAL_PROFILE_DIR=/Users/n3ils/.cloakbrowser/social-profile (CLOAKBROWSER_
+  LICENSE_KEY + SOCIAL_PROXY left blank; recommended to add a residential proxy later).
+- 2FA note: email-code login created a session cookie that persisted; if X later forces re-auth,
+  just re-run `python seed_social_profile.py`.
+- To run the agent: `./dev.sh`, open Social Listen tab, enter topic + platforms, Listen.
+
+## Session update (2026-07-15, part 3) — LinkedIn listener LIVE-tested + working
+- LinkedIn listener was coded but untested. Live test found: (1) LinkedIn SEARCH results page
+  lazy-loads EMPTY under stealth headless (no post DOM), so switched `listen_linkedin` to scrape
+  the FEED (`/feed/`) which reliably renders. (2) Engagement is "N reactions" strings; climb to
+  enclosing card (text>120) for post body. (3) Topic match is SOFT: LinkedIn feed isn't
+  topic-scoped headlessly, so we rank topic-matches first then top-up with highest-reaction posts
+  (don't drop everything when the feed lacks the topic). (4) Author: prefer /in/ link, else take
+  text before first "•" (cosmetic noise remains on some "follows this Page" prefixes — acceptable
+  for prototype).
+- Verified LIVE: `listen_linkedin` returns real posts w/ reaction counts (3146, 805, 749...);
+  end-to-end `POST /api/social/listen` platforms=['linkedin'] -> 200. X listener also re-confirmed.
+- BOTH X + LinkedIn listeners now work against the saved profile. Remaining gaps: LinkedIn author
+  prefix noise; no per-post URL on LinkedIn (none in feed DOM); no residential proxy yet.
+- PROXY explanation given to user: SOCIAL_PROXY routes CloakBrowser through a residential IP to cut
+  ban risk from repeated automated traffic on one home IP. Optional; not required to run.
+
+## Session update (2026-07-15, part 4) — proxy documented + LinkedIn author tightened + relogin note
+- Proxy: already wired in `backend/social/__init__.py._build_browser` (`kwargs["proxy"]` +
+  `geoip=True` from `settings.social_proxy`). This session added USER-FACING PROXY DOCS:
+  * `.env.example` social_proxy comment now shows exact URL format
+    (`http://user:pass@host:port` or `socks5://...`). `.env` SOCIAL_PROXY left blank (no provider yet).
+  * New `notes/09-social-relogin.md`: full re-login procedure — when to re-login (0 posts /
+    login wall), a headless check snippet, exact terminal steps (`cd` -> `source .venv/bin/activate`
+    -> `python seed_social_profile.py`, headed window, log in X then LinkedIn, press ENTER each),
+    why `launch_persistent_context` (not `launch`), why `domcontentloaded` not `networkidle`,
+    how to re-login one platform, proxy setup, and post-relogin verification.
+- LinkedIn author tightening: previously captured noisy prefixes ("Niels Teitge follows this
+  Page LinkedIn for Marketing 5,450,..."). Rewrote author logic in `listen_linkedin` to prefer
+  the in-card `/in/` link's visible text up to "•", else the slug; fallback to text-before-"•".
+  Verified: authors now clean ("Rbranson", "Candice Odgers", "BBC News 16h"); residual edge case
+  is follower-recommendation cards (acceptable).
+- Verified: backend imports OK; listen_linkedin returns real posts w/ clean authors + reactions.
+- No proxy VALUE set (needs a purchased residential proxy). Code path confirmed correct.
+
+## Session update (2026-07-15, part 5) — Editorial AI Studio DESIGNED (not built)
+- User wants a "Content Engine" (VISPAICO Media Engine / Editorial AI Studio): from ONE essay,
+  mine ideas -> plan -> create platform-native assets (LinkedIn/FB/IG/X/Newsletter/YT Shorts/
+  YT long 3-10m/Podcast 2-host 1-5m + Quotes/Hooks/Questions/Predictions), 4 versions each,
+  humanized + quality-scored, with a brand link (default https://www.vispaico.com/en/aios)
+  injected naturally, NO AI tells. Full 6-stage spec came from the user's research (Idea Miner,
+  Strategist, Creator, Humanizer, Quality Director, Multiplier) + deferred Audience Intelligence
+  Editor. Must adapt to ANY brand voice (not hardcoded).
+- DECISION/RECOMMENDATION captured in **notes/10-editorial-ai-studio.md**: do NOT build a flat
+  prompt library. Build a staged orchestration (agent #6) that REUSES + EXTENDS existing agents
+  (content-repurposer, prompt-engineer, Fusion router) and persists intermediate artifacts. The
+  ONLY "prompt library" piece = 6 editable `PromptTemplate` rows. Brand voice = a `BrandProfile`
+  (link + voice + forbidden phrases) injected via the `_instructions_block` pattern we built for
+  Content Studio, so it adapts to any brand. Quality principle honored: ONE idea per creation,
+  4 versions, never one mega-prompt (maps to per-call run_agent).
+- Design includes: 6 new editorial agents, DB models (BrandProfile, EditorialRun, IdeaBank,
+  EditorialCalendar, EditorialAsset, PromptTemplate), `backend/editorial.py` pipeline, route
+  `/api/editorial/*`, frontend Editorial Studio tab. Open decisions listed in the note (new tab
+  vs 4th mode; ship stages 1-5 first; brand defaults; assets editable; extend vs new creator).
+- STATUS: DESIGNED ONLY. No code written yet. NOT built this session — user wanted the design +
+  handoff before next chat. (.env still REQUIRE_LOGIN=false; backend not running.)
+
+## Next steps (per original plan + where we are)

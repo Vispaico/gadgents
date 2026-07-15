@@ -5,11 +5,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import get_settings
 from backend.db import init_db
-from backend.routes import agents, auth, billing, pipeline, router as router_routes, planner, repurposer, leadfinder, wan
+from backend.routes import agents, auth, billing, pipeline, router as router_routes, planner, leadfinder, wan, social
 from backend.routes.agents import close_llm
 from backend.routes.router import close_router_llm
 from backend.routes.planner import close_planner_llm
-from backend.routes.repurposer import close_repurposer_llm
 from backend.routes.leadfinder import close_leadfinder_llm
 from backend.routes.wan import close_wan_llm
 
@@ -23,7 +22,6 @@ async def lifespan(app: FastAPI):
     close_llm()
     close_router_llm()
     close_planner_llm()
-    close_repurposer_llm()
     close_leadfinder_llm()
     close_wan_llm()
 
@@ -44,9 +42,9 @@ app.include_router(billing.router)
 app.include_router(pipeline.router)
 app.include_router(router_routes.router)
 app.include_router(planner.router)
-app.include_router(repurposer.router)
 app.include_router(leadfinder.router)
 app.include_router(wan.router)
+app.include_router(social.router)
 
 
 @app.get("/health")

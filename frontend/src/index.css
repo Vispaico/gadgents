@@ -73,6 +73,8 @@ h1, h2, h3 { margin: 0 0 4px; }
 .output-modes .card:hover { border-color: var(--accent); }
 .output-modes .card.active { border-color: var(--accent); outline: 2px solid var(--accent); }
 .output-modes .card span { font-size: 12px; }
+.brief-detail { display: flex; flex-direction: column; gap: 10px; }
+.brief-detail .card { margin-top: 4px; }
 @media (max-width: 640px) { .output-modes { grid-template-columns: 1fr; } }
 
 /* Lead Finder */

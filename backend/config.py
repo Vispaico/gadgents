@@ -72,6 +72,13 @@ class Settings(BaseSettings):
     firecrawl_base_url: str = "http://localhost:3002"
     firecrawl_api_key: str = "test-key-123"
 
+    # Social Listener (agent #5): CloakBrowser stealth Chromium scraping of X / LinkedIn.
+    # Reads its logged-in session from a persistent profile. Optional residential proxy
+    # recommended to avoid IP-level bans. CloakBrowser must be `pip install`ed separately.
+    cloakbrowser_license_key: str = ""  # Pro builds (v148+) require a subscription
+    social_proxy: str = ""               # e.g. http://user:pass@host:port (residential)
+    social_profile_dir: str = ""        # persistent profile path holding the logged-in session
+
 
 @lru_cache
 def get_settings() -> Settings:

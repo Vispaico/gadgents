@@ -9,11 +9,19 @@ Two agents chained. Credits are charged per agent and summed.
 
 from __future__ import annotations
 
+import json
+
 from backend.agents import get_agent, run_agent
 from backend.billing import charge, InsufficientCredits
-from backend.db import User, Usage
+from backend.db import (
+    User,
+    Usage,
+    ContentBrief,
+    ContentOutput,
+    get_or_create_dev_user,
+)
 from backend.llm import LLMClient
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 # Content Studio stage-2 (content-producer) model per quality/cost mode:
 #   economic  -> current cheap pin (or-llama33) — same as the agent default
@@ -48,6 +56,14 @@ def _normalize_mode(mode: str | None) -> str | None:
     return None
 
 
+def _resolve_user(session: Session, user: User | None) -> User | None:
+    """Return the real user, or a synthetic dev user in REQUIRE_LOGIN=false mode
+    so Repurpose history persists and can be shown even in dev-bypass."""
+    if user is not None:
+        return user
+    return get_or_create_dev_user(session)
+
+
 def run_content_pipeline(
     session: Session,
     user: User,
@@ -56,11 +72,33 @@ def run_content_pipeline(
     llm: LLMClient,
     mode: str | None = None,
     output_mode: str = "content",
+    urls: list[str] | None = None,
+    instructions: str = "",
 ) -> dict:
     pe = get_agent("prompt-engineer")
     cp = get_agent("content-producer")
     if pe is None or cp is None:
         raise RuntimeError("Pipeline agents missing")
+
+    # Fetch any supplied URLs and append their readable text to the material.
+    fetched = ""
+    if urls:
+        from backend.url_reader import read_urls
+        fetched = read_urls(urls)
+    if fetched:
+        raw_material = (
+            f"{raw_material}\n\n"
+            f"=== Content read from the provided URLs ===\n{fetched}"
+        ).strip()
+
+    # Explicit guidance, kept separate from the source so it's read as commands
+    # rather than as text to preserve.
+    _instructions_block = (
+        f"\n\nEXPLICIT INSTRUCTIONS (you MUST follow these, they are not source content):\n"
+        f"\"\"\"\n{instructions.strip()}\n\"\"\""
+        if instructions and instructions.strip()
+        else ""
+    )
 
     norm_mode = _normalize_mode(mode)
     cp_model = CONTENT_PRODUCER_MODEL_BY_MODE.get(norm_mode) if norm_mode else None
@@ -70,6 +108,7 @@ def run_content_pipeline(
         stage1_input = (
             f"Source material:\n\"\"\"\n{raw_material}\n\"\"\"\n\n"
             f"Produce generation prompts for these platforms: {', '.join(platforms)}."
+            f"{_instructions_block}"
         )
         prompts_text, t1i, t1o, c1 = run_agent(pe, stage1_input, llm)
         total_credits = c1
@@ -96,26 +135,39 @@ def run_content_pipeline(
             f"If 'shorts_tiktok' is selected, also produce the script package and "
             f"media_suggestions.\n\n"
             f"ARTICLE / ESSAY:\n\"\"\"\n{raw_material}\n\"\"\""
+            f"{_instructions_block}"
         )
         text, t1i, t1o, c1 = run_agent(rp, user_msg, llm, override_mode=norm_mode)
         charge(session, user, "content-pipeline", c1, t1i, t1o)
+
+        # Persist a brief + per-channel outputs (richer history than raw text).
+        brief_id = None
+        effective_user = _resolve_user(session, user)
+        if effective_user is not None:
+            brief_id = _persist_repurpose(
+                session, effective_user.id, raw_material, channels, text
+            )
+
         return {
             "prompts": "",
             "content": text,
             "credits_used": c1,
             "remaining_credits": user.credits if user else 0,
+            "brief_id": brief_id,
         }
 
     # Content+Media (default): stage 1 prompts -> stage 2 finished content.
     stage1_input = (
         f"Source material:\n\"\"\"\n{raw_material}\n\"\"\"\n\n"
         f"Produce generation prompts for these platforms: {', '.join(platforms)}."
+        f"{_instructions_block}"
     )
     prompts_text, t1i, t1o, c1 = run_agent(pe, stage1_input, llm)
 
     stage2_input = (
         f"Generated prompts:\n\"\"\"\n{prompts_text}\n\"\"\"\n\n"
         f"Now produce the finished, platform-ready content for: {', '.join(platforms)}."
+        f"{_instructions_block}"
     )
     content_text, t2i, t2o, c2 = run_agent(cp, stage2_input, llm, override_model=cp_model)
 
@@ -128,3 +180,58 @@ def run_content_pipeline(
         "credits_used": total_credits,
         "remaining_credits": user.credits if user else 0,
     }
+
+
+def _persist_repurpose(
+    session: Session,
+    user_id: int,
+    raw_material: str,
+    channels: list[str],
+    text: str,
+) -> int | None:
+    """Parse the repurposer's JSON result and persist a ContentBrief + per-channel
+    ContentOutput rows. Returns the brief id, or None if the result isn't JSON."""
+    try:
+        data = json.loads(text)
+        parsed = True
+    except json.JSONDecodeError:
+        data = {"raw": text}
+        parsed = False
+    if not parsed:
+        return None
+
+    brief = ContentBrief(
+        user_id=user_id,
+        source_title="",
+        source_text=raw_material[:4000],
+        channels=",".join(channels),
+        tone="match the source's own voice",
+        audience="general",
+        brief_json=json.dumps(data.get("brief", {}), ensure_ascii=False),
+    )
+    session.add(brief)
+    session.commit()
+    session.refresh(brief)
+
+    model = "fusion:or-opus"
+    for ch in channels:
+        block = data.get("posts", {}).get(ch)
+        if block:
+            session.add(ContentOutput(
+                brief_id=brief.id, user_id=user_id, channel=ch,
+                variant_index=0, content_json=json.dumps(block, ensure_ascii=False),
+                model=model,
+            ))
+    if "script" in data:
+        session.add(ContentOutput(
+            brief_id=brief.id, user_id=user_id, channel="script",
+            content_json=json.dumps(data["script"], ensure_ascii=False), model=model,
+        ))
+    if "media_suggestions" in data:
+        session.add(ContentOutput(
+            brief_id=brief.id, user_id=user_id, channel="media",
+            content_json=json.dumps(data["media_suggestions"], ensure_ascii=False),
+            model=model,
+        ))
+    session.commit()
+    return brief.id

@@ -172,6 +172,18 @@ def get_memories(session: Session, user_id: int) -> list[PlannerMemory]:
 # ===========================================================================
 # Content Repurposer (agent #2) state: canonical brief + per-channel outputs.
 # ===========================================================================
+def get_or_create_dev_user(session: Session) -> User:
+    """Synthetic user used to persist history in dev-bypass mode (REQUIRE_LOGIN=false)
+    where the frontend supplies no real user. Only ever created in that mode."""
+    dev_email = "__dev__@gadgents.local"
+    existing = session.exec(select(User).where(User.email == dev_email)).first()
+    if existing:
+        return existing
+    dev = User(email=dev_email, hashed_password="", credits=0, plan="dev")
+    session.add(dev)
+    session.commit()
+    session.refresh(dev)
+    return dev
 class ContentBrief(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(index=True)
@@ -289,3 +301,33 @@ def get_user_by_email(session: Session, email: str) -> Optional[User]:
 
 def get_user(session: Session, user_id: int) -> Optional[User]:
     return session.get(User, user_id)
+
+
+# ===========================================================================
+# Social Listener (agent #5) state: a topic query + the posts it pulled.
+# Posts are scraped via CloakBrowser (stealth Chromium) from X / LinkedIn using a
+# persistent logged-in profile. Engagement fields drive client-side sorting.
+# NOTE: scraping another platform's posts via an authenticated session carries ToS
+# and ban risk; that's a user-accepted product decision, not a code concern.
+# ===========================================================================
+class SocialQuery(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    topic: str = ""               # the search/topic the user asked for
+    platforms: str = ""           # csv: x|linkedin
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class SocialPost(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    query_id: int = Field(index=True)
+    user_id: int = Field(index=True)
+    platform: str = ""             # x | linkedin
+    author: str = ""
+    text: str = ""
+    like_count: int = 0
+    repost_count: int = 0
+    reply_count: int = 0
+    url: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+

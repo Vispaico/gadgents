@@ -52,8 +52,14 @@ export const api = {
   plans: () => req("GET", "/billing/plans"),
   me: () => req("GET", "/billing/me"),
   buy: (plan) => req("POST", "/billing/buy", { plan }),
-  pipeline: (material, platforms, output_mode = "content") =>
-    req("POST", "/pipeline/content", { material, platforms, output_mode }),
+  pipeline: (material, platforms, output_mode = "content", urls = [], instructions = "") =>
+    req("POST", "/pipeline/content", { material, platforms, output_mode, urls, instructions }),
+  pipelineBriefs: () => req("GET", "/pipeline/briefs"),
+  pipelineBrief: (id) => req("GET", `/pipeline/briefs/${id}`),
+  socialListen: (topic, platforms, limit = 20) =>
+    req("POST", "/social/listen", { topic, platforms, limit }),
+  socialQueries: () => req("GET", "/social/queries"),
+  socialPosts: (queryId) => req("GET", `/social/queries/${queryId}/posts`),
   leadIcpChat: (message, history) =>
     req("POST", "/leadfinder/icp-chat", { message, history }),
   leadRun: (icp) => req("POST", "/leadfinder/run", { icp }),
