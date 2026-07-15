@@ -294,7 +294,13 @@ class EditorialRun(SQLModel, table=True):
     user_id: int = Field(index=True)
     brand_id: int = Field(index=True)
     essay_text: str = ""            # the source essay/empirical material
-    status: str = "running"         # running | done | failed
+    status: str = "running"         # running | done | failed | canceled
+    ideas_count: int = 0
+    assets_count: int = 0
+    credits_used: int = 0
+    error: str = ""
+    canceled: bool = False          # set by the Cancel button or the guardrail
+    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -494,8 +500,46 @@ def get_engine() -> "create_engine":
     return engine
 
 
+def _ensure_columns() -> None:
+    """Add any columns that were introduced after an existing SQLite DB was created.
+
+    SQLModel's create_all only creates NEW tables; it never ALTERs existing ones, so a
+    dev DB from before these columns were added would otherwise fail on insert. We
+    reconcile the on-disk schema with the model metadata per column. Safe to run every
+    startup; it only adds what's missing."""
+    eng = get_engine()
+    inspector = __import__("sqlalchemy").inspect(eng)
+    with eng.begin() as conn:
+        for table in SQLModel.metadata.tables.values():
+            if not inspector.has_table(table.name):
+                continue
+            existing = {c["name"] for c in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name not in existing:
+                    # Resolve the column's DB type via the dialect.
+                    from sqlalchemy import dialects
+
+                    sqlite_dialect = dialects.sqlite.dialect()
+                    col_type = column.type.compile(dialect=sqlite_dialect)
+                    # NOTE: SQLite ALTER TABLE can only add NULLable columns, so we do
+                    # not emit NOT NULL (missing rows get the Python-side default at
+                    # insert time). Server-side defaults, if any, are appended.
+                    default = (
+                        f" DEFAULT {column.server_default.arg}"
+                        if column.server_default is not None
+                        else ""
+                    )
+                    conn.execute(
+                        __import__("sqlalchemy").text(
+                            f"ALTER TABLE {table.name} ADD COLUMN {column.name} "
+                            f"{col_type}{default}"
+                        )
+                    )
+
+
 def init_db() -> None:
     SQLModel.metadata.create_all(get_engine())
+    _ensure_columns()
     # Idempotent seed of editorial defaults (brand profiles + stage prompt templates).
     with Session(get_engine()) as _seed_session:
         seed_editorial_defaults(_seed_session)

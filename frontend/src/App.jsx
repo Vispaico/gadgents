@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { api, getToken, setToken, getMode, setMode } from "./api.js";
 
 const ALL_PLATFORMS = ["Instagram", "TikTok", "LinkedIn", "X", "YouTube", "Facebook"];
@@ -578,6 +578,9 @@ function EditorialStudio({ user, setError, onRepurpose }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [openAsset, setOpenAsset] = useState(null);
+  const [canceledRunId, setCanceledRunId] = useState(null);
+  const runNonceRef = useRef(0);  // bumps each run so a stale poll loop stops
+  const cancelCurrentRef = useRef(null);  // set during a running run; nulled when done
 
   useEffect(() => {
     api.editorialBrands().then((b) => {
@@ -600,17 +603,53 @@ function EditorialStudio({ user, setError, onRepurpose }) {
     setErr("");
     setResult(null);
     setOpenAsset(null);
+    setCanceledRunId(null);
+    // Each run gets a nonce; if the user starts another run, the old poll loop stops.
+    const myNonce = ++runNonceRef.current;
+    // The user can cancel a run in-flight without killing the dev server (which would
+    // otherwise leave OpenRouter calls billing in the background).
+    cancelCurrentRef.current = async () => {
+      try {
+        await api.editorialCancel(res.run_id);
+        setCanceledRunId(res.run_id);
+      } catch (e) {
+        setErr(e.message);
+      }
+    };
     try {
       const res = await api.editorialRun(
         essay, brandId, platforms, getMode() || null, maxIdeas, runMultiplier
       );
-      setResult(res);
-      if (user) user.credits = res.remaining_credits;
+      // The pipeline runs in the background; poll until it finishes. This keeps the UI
+      // responsive and prevents a "hang with no output" while many model calls run.
+      let status = res;
+      for (let i = 0; i < 480; i++) {  // ~ up to 16 min at 2s intervals
+        if (runNonceRef.current !== myNonce) return;  // superseded
+        await new Promise((r) => setTimeout(r, 2000));
+        if (runNonceRef.current !== myNonce) return;
+        status = await api.editorialRunStatus(res.run_id);
+        setResult(status);
+        if (user) user.credits = status.remaining_credits;
+        // Any terminal state ends the poll loop (the backend also auto-aborts on the
+        // time/credit guardrails, returning canceled/failed rather than running forever).
+        if (["done", "failed", "canceled"].includes(status.status)) break;
+      }
+      if (status.status === "failed") {
+        setErr("Run failed: " + (status.error || "unknown error"));
+      } else if (status.status === "canceled") {
+        setErr("Run canceled. Partial results (if any) are kept — see below.");
+      }
     } catch (e) {
       setErr(e.message);
     } finally {
       setBusy(false);
+      cancelCurrentRef.current = null;
+      setCanceledRunId(null);
     }
+  }
+
+  async function cancelRun() {
+    if (cancelCurrentRef.current) await cancelCurrentRef.current();
   }
 
   async function saveAsset(asset, versions) {
@@ -760,19 +799,30 @@ function EditorialStudio({ user, setError, onRepurpose }) {
       <button disabled={busy || !essay.trim() || platforms.length === 0} onClick={run}>
         {busy ? "Running engine…" : "Run Editorial Engine"}
       </button>
+      {busy && (
+        <button className="link" onClick={cancelRun} title="Stop the run without killing the server (keeps partial results)">
+          ⏹ Cancel run
+        </button>
+      )}
       {err && <div className="error">{err}</div>}
 
       {result && (
         <div className="result">
-          <h3>Run complete</h3>
+          {result.status === "running" ? (
+            <h3>Engine running… {(result.assets?.length) || 0} assets so far — please wait</h3>
+          ) : result.status === "canceled" ? (
+            <h3>Run canceled</h3>
+          ) : (
+            <h3>Run complete</h3>
+          )}
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
-            <button className="link" onClick={downloadMarkdown}>↓ Download .md</button>
-            <button className="link" onClick={downloadPdf}>↓ Download .pdf</button>
+            <button className="link" onClick={downloadMarkdown} disabled={result.status === "running"}>↓ Download .md</button>
+            <button className="link" onClick={downloadPdf} disabled={result.status === "running"}>↓ Download .pdf</button>
           </div>
           <p className="muted">
             mined {result.ideas_count} ideas · selected {result.selected_ideas} ·{" "}
             {result.assets.length} assets · used {result.credits_used} credits ·{" "}
-            {result.remaining_credits} left
+            {result.remaining_credits} left{result.status === "running" ? " (estimate)" : ""}
           </p>
           {result.multiplier_ip?.length > 0 && (
             <div className="result">

@@ -222,11 +222,24 @@ def _run_fusion(
             continue
 
     if not answers:
-        raise RuntimeError("Fusion panel: all models failed")
+        # Every panel member failed (or was skipped). Don't crash with a cryptic
+        # index error — fall back to a single recommended model for the goal so the
+        # editorial stage still returns something instead of killing the whole run.
+        fb = recommend(mode if mode in _MODE_ORDER else "mixed")
+        try:
+            res = llm.complete_targeted(
+                fb.provider, fb.model, messages,
+                temperature=temperature, max_tokens=max_tokens,
+            )
+            return res.text, fb.id
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Fusion panel: all models failed and fallback errored: {exc}")
 
-    judge_entry = get_model(judge_id)
+    judge_entry = get_model(judge_id) or get_model(answers[0][0])
     if judge_entry is None:
-        judge_entry = get_model(answers[0][0])
+        # answers[0][0] was a real model id; if it somehow isn't in the catalog, use
+        # the first available catalog model rather than indexing blindly.
+        judge_entry = get_model(answers[0][0]) or _BY_ID.get(panel_ids[0]) or MODEL_CATALOG[0]
     synthesis_prompt = _build_judge_prompt(answers)
     judge_messages = messages + [{"role": "user", "content": synthesis_prompt}]
     result = llm.complete_targeted(

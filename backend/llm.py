@@ -56,7 +56,11 @@ class LLMClient:
         self._health: dict[ProviderName, _ProviderHealth] = {
             p: _ProviderHealth() for p in self._order
         }
-        self._client = httpx.Client(timeout=60.0)
+        # Generous timeout: Fusion judge calls + long/slow model outputs (esp. on
+        # OpenRouter free/economic tiers) routinely exceed the default 60s, which
+        # caused run failures ("run failed") on perfectly good requests. Read=180s
+        # covers a slow but live completion; connect=20s avoids hanging on DNS.
+        self._client = httpx.Client(timeout=httpx.Timeout(connect=20.0, read=180.0, write=60.0, pool=10.0))
 
     def _api_key(self, provider: ProviderName) -> Optional[str]:
         keys = {
@@ -163,6 +167,17 @@ class LLMClient:
             )
             resp.raise_for_status()
             data = resp.json()
+            # OpenRouter/OpenAI return {"error": {...}} (or an empty "choices") on many
+            # failure modes (throttle, content filter, model unavailable). Indexing
+            # choices[0] blindly crashed the whole editorial run with a cryptic
+            # "tuple/list index out of range". Guard it and surface a clear message.
+            if not isinstance(data, dict) or not data.get("choices"):
+                detail = ""
+                if isinstance(data, dict) and data.get("error"):
+                    detail = f" API error: {data['error']}"
+                raise RuntimeError(
+                    f"{provider}/{model} returned no completions (status {resp.status_code}).{detail}"
+                )
             choice = data["choices"][0]["message"]["content"]
             usage = data.get("usage", {})
             self._health[provider].failures = 0
@@ -175,4 +190,6 @@ class LLMClient:
             )
         except Exception as exc:  # noqa: BLE001
             self._mark_failure(provider)
+            if isinstance(exc, RuntimeError) and "no completions" in str(exc):
+                raise  # already a clear message
             raise RuntimeError(f"{provider}/{model} failed: {exc}") from exc

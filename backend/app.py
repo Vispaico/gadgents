@@ -11,6 +11,7 @@ from backend.routes.router import close_router_llm
 from backend.routes.planner import close_planner_llm
 from backend.routes.leadfinder import close_leadfinder_llm
 from backend.routes.wan import close_wan_llm
+from backend.db import Session, get_engine
 
 _settings = get_settings()
 
@@ -18,6 +19,14 @@ _settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    # Reap any editorial run orphaned by a previous server kill (otherwise it shows
+    # perpetual "running" and can't be canceled).
+    with Session(get_engine()) as s:
+        from backend.editorial import reap_interrupted_runs
+
+        reaped = reap_interrupted_runs(s)
+    if reaped:
+        print(f"[editorial] reaped {reaped} interrupted run(s) from a previous process")
     yield
     close_llm()
     close_router_llm()

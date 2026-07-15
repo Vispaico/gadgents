@@ -69,6 +69,8 @@ export const api = {
   wanBriefs: () => req("GET", "/wan/briefs"),
   editorialRun: (essay, brand_id, platforms = [], mode = null, max_ideas = 8, run_multiplier = false) =>
     req("POST", "/editorial/run", { essay, brand_id, platforms, mode, max_ideas, run_multiplier }),
+  editorialRunStatus: (runId) => req("GET", `/editorial/runs/${runId}`),
+  editorialCancel: (runId) => req("POST", `/editorial/runs/${runId}/cancel`),
   editorialRuns: () => req("GET", "/editorial/runs"),
   editorialAssets: (runId) => req("GET", `/editorial/runs/${runId}/assets`),
   editorialUpdateAsset: (assetId, versions) =>

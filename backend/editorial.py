@@ -20,6 +20,7 @@ Orchestration shape (mirrors backend/pipeline.py but with a loop):
 from __future__ import annotations
 
 import json
+import time
 from typing import Optional
 
 from backend.agents import get_agent
@@ -36,6 +37,15 @@ from backend.db import (
 )
 from backend.llm import LLMClient, OpenAIChatMessage
 from sqlmodel import Session, select
+
+
+class EditorialCanceled(Exception):
+    """Raised when an editorial run is canceled (by the user or a guardrail) so the
+    worker loop can stop cleanly. Distinguished from a real failure at the call site."""
+
+    def __init__(self, run_id: int):
+        self.run_id = run_id
+        super().__init__(f"Editorial run {run_id} was canceled")
 
 
 # Platforms the engine can target. The frontend chooses a subset.
@@ -68,6 +78,70 @@ _STAGE_AGENT = {
     "multiplier": "editorial-multiplier",
 }
 
+# ---------------------------------------------------------------------------
+# Run guardrails: keep a runaway Editorial run from burning unbounded tokens.
+# ---------------------------------------------------------------------------
+# Per-run wall-clock ceiling. A run that exceeds this is auto-aborted (the system
+# prompt is long for each stage, so budget generously but not unbounded).
+RUN_TIMEOUT_SECONDS = 20 * 60  # 20 minutes
+
+# Hard ceiling on estimated credits for ONE run. Editorial is expensive; this is a
+# circuit breaker so a misbehaving chain can never blow the whole balance. Mirrors
+# the per-stage estimate in _estimate_credits (base + ~1 per 4000 chars generated).
+RUN_MAX_CREDITS = 2000
+
+# In-memory set of run_ids that the user (or the guardrail) has asked to cancel.
+# Editorial runs execute on a worker thread; the worker checks this flag between
+# stages and after every model call, because a kill of the dev server does NOT stop
+# in-flight OpenRouter requests (they keep billing server-side after the client dies).
+_CANCELLED: set[int] = set()
+
+# Per-mode max_tokens for each stage. The earlier flat 8000 was a token multiplier:
+# every Fusion panel member + the judge each emitted up to 8000 output tokens even
+# for small assets. Most stages need far less; the Quality Director (a single asset
+# rewrite) is the only place that occasionally needs more.
+_STAGE_MAX_TOKENS: dict[str, int] = {
+    "idea_miner": 4000,    # 25-50 short ideas as JSON; 4k is plenty (was 6k = slow + costly)
+    "strategist": 3000,
+    "creator": 3000,       # per-platform asset (4 versions) rarely needs more than 3k
+    "humanizer": 2500,
+    "quality_director": 3000,  # single-asset rewrite; capped to bound per-asset cost
+    "multiplier": 2500,
+}
+
+
+def cancel_run(run_id: int) -> None:
+    """Mark a run for cancellation (checked by the worker loop)."""
+    _CANCELLED.add(run_id)
+
+
+def is_canceled(run_id: int) -> bool:
+    return run_id in _CANCELLED
+
+
+def clear_cancel(run_id: int) -> None:
+    _CANCELLED.discard(run_id)
+
+
+def reap_interrupted_runs(session: Session) -> int:
+    """On startup, mark any run left in "running" (its worker died with the previous
+    process) as failed so it stops showing perpetual "running" in the UI. Without this,
+    killing the dev server left the row running forever and the UI polled indefinitely.
+    Returns the number of runs reaped."""
+    stuck = session.exec(
+        select(EditorialRun).where(EditorialRun.status == "running")
+    ).all()
+    for r in stuck:
+        r.status = "failed"
+        r.error = (
+            "Run was interrupted (server restarted or process killed). "
+            "Partial assets, if any, are kept."
+        )
+        session.add(r)
+    if stuck:
+        session.commit()
+    return len(stuck)
+
 
 def _stage_system_prompt(session: Session, stage: str) -> str:
     """Editable stage prompt from PromptTemplate, falling back to the agent default."""
@@ -84,41 +158,95 @@ def _run_stage(
     stage: str,
     user_input: str,
     override_mode: Optional[str] = None,
+    run_id: Optional[int] = None,
 ) -> tuple[str, str]:
     """Run one editorial stage. Uses the editable PromptTemplate as the system prompt
     and routes through Fusion (agents that are fusion=True) honoring the quality/cost
     toggle. Returns (text, model_id_used).
 
-    IMPORTANT: editorial stages produce large JSON (the Idea Miner alone can emit 25-50
-    ideas), so we raise max_tokens well above the router default of 2048. The router
-    default would silently TRUNCATE the reply mid-JSON, producing 0 parsed ideas/assets
-    while STILL charging the staged credits — a real money bug."""
+    CRITICAL cost rule: the user's Quality / Balanced / Economic toggle is the SOURCE OF
+    TRUTH. The editorial agents hard-pin Opus for single-model stages and default to the
+    High Opus Fusion panel, so BOTH the hard pin AND the agent default must be overridden
+    here — otherwise "Balanced" silently bills Opus for every stage (the runaway bug).
+    Mapping: Quality -> "high" (Opus), Balanced -> "mixed" (NO Opus), Economic -> cheapest.
+    The frontend sends Balanced as null/"mixed", so a missing mode defaults to "mixed".
+    - Max_tokens is per-stage (not a flat 8000) to bound output tokens per call.
+    - Raises EditorialCanceled if the run was canceled or the wall-clock budget blew."""
+    from backend.router import route, _FUSION_PRESETS
+
+    if run_id is not None and is_canceled(run_id):
+        raise EditorialCanceled(run_id)
+
     agent_def = get_agent(_STAGE_AGENT[stage])
     system_prompt = _stage_system_prompt(session, stage)
     messages: list[OpenAIChatMessage] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_input},
     ]
-    from backend.router import route, _FUSION_PRESETS
 
-    goal = override_mode or agent_def.mode
-    fusion = agent_def.fusion
-    panel = agent_def.fusion_panel
-    judge = agent_def.fusion_judge
-    if fusion and override_mode in _FUSION_PRESETS:
-        panel = _FUSION_PRESETS[override_mode]["panel"]
-        judge = _FUSION_PRESETS[override_mode]["judge"]
-    result, used_id = route(
-        llm,
-        messages,
-        model_id=agent_def.router_model,
-        goal=goal,
-        fusion=fusion,
-        panel=panel,
-        judge=judge,
-        max_tokens=8000,
-    )
-    return result, used_id or agent_def.router_model or (agent_def.fusion_judge if fusion else goal)
+    # The user's toggle drives the whole stage. Balanced (null from the UI) resolves to
+    # "mixed", which has NO Opus in either the single-model map or the fusion preset.
+    eff_mode = override_mode if override_mode in ("economic", "mixed", "high") else "mixed"
+    mt = _STAGE_MAX_TOKENS.get(stage, 4000)
+
+    if agent_def.fusion:
+        # Use the matching Fusion preset for the chosen mode. All three keys exist; the
+        # "mixed" preset (sonnet46/qwen37/luna, judge sonnet5) contains no Opus.
+        preset = _FUSION_PRESETS[eff_mode]
+        result, used_id = route(
+            llm,
+            messages,
+            model_id=None,
+            goal=eff_mode,
+            fusion=True,
+            panel=preset["panel"],
+            judge=preset["judge"],
+            max_tokens=mt,
+        )
+        return result, used_id or (preset["judge"])
+    else:
+        # Single-model stage: OVERRIDE the agent's hard Opus pin with the per-mode model
+        # so Balanced/Economic are genuinely cheap. Quality keeps Opus.
+        single_model = {
+            "high": "or-opus",
+            "mixed": "or-sonnet46",
+            "economic": "or-llama33",
+        }[eff_mode]
+        try:
+            result, used_id = route(
+                llm,
+                messages,
+                model_id=single_model,
+                goal=eff_mode,
+                fusion=False,
+                max_tokens=mt,
+            )
+            return result, used_id or single_model
+        except Exception as exc:
+            # A single transient provider/model failure shouldn't kill the whole run.
+            # Retry once on a safe, always-available fallback model before giving up.
+            from backend.router import recommend
+
+            fb = recommend(eff_mode)
+            if fb.id == single_model:
+                raise RuntimeError(
+                    f"Editorial stage '{stage}' failed on {single_model}: {exc}"
+                )
+            try:
+                result, used_id = route(
+                    llm,
+                    messages,
+                    model_id=fb.id,
+                    goal=eff_mode,
+                    fusion=False,
+                    max_tokens=mt,
+                )
+                return result, used_id or fb.id
+            except Exception as exc2:
+                raise RuntimeError(
+                    f"Editorial stage '{stage}' failed on {single_model} "
+                    f"(and fallback {fb.id}): {exc} | {exc2}"
+                )
 
 
 def _brand_block(brand: BrandProfile) -> str:
@@ -195,7 +323,14 @@ def run_editorial_pipeline(
         raise RuntimeError("No brand profile configured")
     brand_block = _brand_block(brand)
 
-    effective_user = user if user is not None else get_or_create_dev_user(session)
+    # Always resolve the user within THIS session. A User loaded in another session
+    # (e.g. the request session, passed into a worker thread) is detached here and
+    # accessing .id triggers a cross-session lazy refresh that crashes SQLAlchemy's row
+    # processor ("tuple index out of range"). Re-load by id so we own the instance.
+    if user is not None:
+        effective_user = session.get(User, user.id) or get_or_create_dev_user(session)
+    else:
+        effective_user = get_or_create_dev_user(session)
 
     run = EditorialRun(
         user_id=effective_user.id,
@@ -206,14 +341,39 @@ def run_editorial_pipeline(
     session.add(run)
     session.commit()
     session.refresh(run)
+    run_id = run.id
+    deadline = time.monotonic() + RUN_TIMEOUT_SECONDS
+
+    def _guard() -> None:
+        """Raise to abort the run if it was canceled or exceeded a budget guardrail.
+        Checked between stages and after every asset so a runaway chain stops promptly
+        (killing the dev server does NOT stop in-flight OpenRouter billing)."""
+        if is_canceled(run_id):
+            raise EditorialCanceled(run_id)
+        if time.monotonic() > deadline:
+            raise RuntimeError(
+                f"Run exceeded the {RUN_TIMEOUT_SECONDS // 60}-minute time limit and was "
+                "auto-canceled to cap cost. The assets created so far are saved."
+            )
+        if total_credits > RUN_MAX_CREDITS:
+            raise RuntimeError(
+                f"Run exceeded the {RUN_MAX_CREDITS}-credit budget and was auto-canceled "
+                "to cap cost. The assets created so far are saved."
+            )
 
     norm_mode = mode if mode in ("economic", "mixed", "balanced", "high", "quality") else None
     total_credits = 0
+    # Pre-initialized so the cancellation handler can read them whether or not any
+    # stage completed. Assets saved before cancellation are preserved.
+    ideas: list = []
+    selected_ideas: list = []
+    assets: list = []
 
     try:
         # ---- Stage 1: Idea Miner ----
+        _guard()
         miner_in = f"SOURCE ESSAY:\n\"\"\"\n{essay}\n\"\"\"\n\n{brand_block}"
-        ideas_text, m1 = _run_stage(llm, session, "idea_miner", miner_in, norm_mode)
+        ideas_text, m1 = _run_stage(llm, session, "idea_miner", miner_in, norm_mode, run_id=run_id)
         ideas_data = _safe_json(ideas_text) or {"ideas": []}
         ideas = ideas_data.get("ideas", [])
         if not ideas:
@@ -228,16 +388,20 @@ def run_editorial_pipeline(
             )
         bank = IdeaBank(run_id=run.id, ideas_json=json.dumps(ideas, ensure_ascii=False))
         session.add(bank)
+        # Publish live progress so the polling UI shows mined-count instead of 0.
+        run.ideas_count = len(ideas)
+        session.add(run)
         session.commit()
         total_credits += _estimate_credits("editorial-idea-miner", ideas_text)
 
         # ---- Stage 2: Strategist ----
+        _guard()
         strat_in = (
             f"IDEA BANK (JSON):\n{json.dumps(ideas, ensure_ascii=False)}\n\n"
             f"Pick the {max_ideas} best, most diverse ideas for a 4-week calendar.\n"
             f"{brand_block}"
         )
-        plan_text, m2 = _run_stage(llm, session, "strategist", strat_in, norm_mode)
+        plan_text, m2 = _run_stage(llm, session, "strategist", strat_in, norm_mode, run_id=run_id)
         plan = _safe_json(plan_text) or {"selected": [], "calendar": []}
         selected = plan.get("selected", [])
         # Fall back to the top ideas by (novelty+reach) if the strategist returned none.
@@ -250,6 +414,12 @@ def run_editorial_pipeline(
                     reverse=True,
                 )[:max_ideas]
             ]
+        # HARD CAP: the strategist may return more ideas than the user asked for (or
+        # ignore max_ideas entirely). Without this, a "max 4" request could process 12+
+        # ideas => dozens of extra model calls (Creator/Humanizer/Quality per asset) and
+        # a 10x token blow-up. The user's max_ideas is a hard ceiling, never exceeded.
+        if max_ideas and len(selected) > max_ideas:
+            selected = selected[:max_ideas]
         cal = EditorialCalendar(run_id=run.id, calendar_json=json.dumps(plan, ensure_ascii=False))
         session.add(cal)
         session.commit()
@@ -261,8 +431,16 @@ def run_editorial_pipeline(
 
         # ---- Stages 3-5: Creator -> Humanizer -> Quality Director (per idea) ----
         platforms_arg = platforms or EDITORIAL_PLATFORMS
+        # Hard ceiling on total assets so a misbehaving model (returning a huge platform
+        # list or thousands of one-liners) cannot spawn an unbounded number of paid calls.
+        # Roughly: selected_ideas * platforms (each platform = 1 post asset) + one-liner
+        # kinds. Capped well above any sane request to still allow quotes/hooks (10/20).
+        MAX_ASSETS = max(40, (len(selected_ideas) * len(platforms_arg)) + 80)
         assets: list[dict] = []
         for idea in selected_ideas:
+            if len(assets) >= MAX_ASSETS:
+                break
+            _guard()
             idea_block = (
                 "IDEA to create for (create ONLY for THIS idea, never reference the essay):\n"
                 f"title: {idea.get('title', '')}\n"
@@ -273,11 +451,13 @@ def run_editorial_pipeline(
                 f"For quotes/hooks/questions/predictions produce these counts: "
                 f"{_KIND_COUNTS}.\n\n{brand_block}"
             )
-            creator_text, mc = _run_stage(llm, session, "creator", idea_block, norm_mode)
+            creator_text, mc = _run_stage(llm, session, "creator", idea_block, norm_mode, run_id=run_id)
             total_credits += _estimate_credits("editorial-creator", creator_text)
             created = _safe_json(creator_text) or {"assets": []}
 
             for asset in created.get("assets", []):
+                if len(assets) >= MAX_ASSETS:
+                    break
                 platform = asset.get("platform", "")
                 kind = asset.get("kind", "post")
                 versions = asset.get("versions", [])
@@ -297,7 +477,7 @@ def run_editorial_pipeline(
                     f"{json.dumps({'platform': platform, 'kind': kind, 'versions': versions}, ensure_ascii=False)}\n\n"
                     f"{brand_block}"
                 )
-                hum_text, mh = _run_stage(llm, session, "humanizer", hum_in, norm_mode)
+                hum_text, mh = _run_stage(llm, session, "humanizer", hum_in, norm_mode, run_id=run_id)
                 total_credits += _estimate_credits("editorial-humanizer", hum_text)
                 hum = _safe_json(hum_text) or {}
                 hum_first = _match_asset(hum.get("assets", [{}]))
@@ -309,7 +489,7 @@ def run_editorial_pipeline(
                     f"{json.dumps({'platform': platform, 'kind': kind, 'versions': hum_versions}, ensure_ascii=False)}\n\n"
                     f"{brand_block}"
                 )
-                qd_text, mq = _run_stage(llm, session, "quality_director", qd_in, norm_mode)
+                qd_text, mq = _run_stage(llm, session, "quality_director", qd_in, norm_mode, run_id=run_id)
                 total_credits += _estimate_credits("editorial-quality-director", qd_text)
                 qd = _safe_json(qd_text) or {}
                 qd_first = _match_asset(qd.get("assets", [{}]))
@@ -330,6 +510,9 @@ def run_editorial_pipeline(
                     quality_score=max(0, min(10, score)),
                 )
                 session.add(row)
+                # Publish live progress after every asset so the UI counts up in real time.
+                run.assets_count = len(assets) + 1
+                session.add(run)
                 session.commit()
                 session.refresh(row)
                 assets.append({
@@ -340,21 +523,26 @@ def run_editorial_pipeline(
                     "versions": stored_versions,
                     "quality_score": row.quality_score,
                 })
+                _guard()
 
         # ---- Stage 6 (optional): Multiplier ----
         multiplier_ip = []
         if run_multiplier and assets:
+            _guard()
             mult_in = (
                 "Created assets (platform/kind only) for context:\n"
                 f"{json.dumps([{'platform': a['platform'], 'kind': a['kind']} for a in assets], ensure_ascii=False)}\n\n"
                 f"{brand_block}"
             )
-            mult_text, mm = _run_stage(llm, session, "multiplier", mult_in, norm_mode)
+            mult_text, mm = _run_stage(llm, session, "multiplier", mult_in, norm_mode, run_id=run_id)
             total_credits += _estimate_credits("editorial-multiplier", mult_text)
             mult = _safe_json(mult_text) or {}
             multiplier_ip = mult.get("ip", [])
 
         run.status = "done"
+        run.ideas_count = len(ideas)
+        run.assets_count = len(assets)
+        run.credits_used = total_credits
         session.add(run)
         session.commit()
 
@@ -370,8 +558,30 @@ def run_editorial_pipeline(
             "credits_used": total_credits,
             "remaining_credits": effective_user.credits if effective_user else 0,
         }
+    except EditorialCanceled:
+        # User (or guardrail) aborted: mark canceled, keep whatever assets we saved.
+        # We do NOT re-raise — the route treats this as a terminal, expected state.
+        run.status = "canceled"
+        run.canceled = True
+        run.error = "Run was canceled."
+        run.ideas_count = len(ideas)
+        run.assets_count = len(assets)
+        run.credits_used = total_credits
+        session.add(run)
+        session.commit()
+        return {
+            "run_id": run.id,
+            "brand": {"id": brand.id, "name": brand.name, "link_url": brand.link_url},
+            "ideas_count": len(ideas),
+            "selected_ideas": len(selected_ideas),
+            "assets": assets,
+            "multiplier_ip": [],
+            "credits_used": total_credits,
+            "remaining_credits": effective_user.credits if effective_user else 0,
+        }
     except Exception as exc:
         run.status = "failed"
+        run.error = str(exc)[:2000]
         session.add(run)
         session.commit()
         if isinstance(exc, InsufficientCredits):

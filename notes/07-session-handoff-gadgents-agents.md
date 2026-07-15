@@ -571,4 +571,148 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
   forbidden now includes 'secret'; full pipeline run with Haiphong brand produces correct assets
   (linkedin=4, quotes=10); backend compiles; `/api/editorial/brands` lists 3; frontend builds.
 
+## Session update (2026-07-15, part 11) — CRITICAL: Editorial Studio runaway-token bug FIXED
+- User pasted a LONG essay with max_ideas=4 in "Balanced", it never finished, produced nothing,
+  and burned a LOT of (paid OpenRouter) tokens. Killing the dev server did NOT stop billing —
+  in-flight OpenRouter requests kept running server-side after the client died. A second debug
+  chat fired more runs and the Mac had to be hard-powered-off to stop the burn. Models seen
+  billing during the incident: claude-opus-4.8, deepseek-v4-pro, claude-sonnet-4.6 (the editorial
+  Fusion panels), confirming the expensive stages ran regardless of the "Balanced" choice.
+- ROOT CAUSES (5):
+  1. **No cancellation / no wall-clock deadline / no per-run token budget.** The pipeline runs on
+     a `ThreadPoolExecutor` worker with no stop button and no timeout. Killing servers can't abort
+     accepted OpenRouter calls, so they bill to completion on the server. That's why the burn
+     continued after processes were killed and only a full Mac shutdown stopped it.
+  2. **The Editorial Fusion stages ignored the Quality/Balanced toggle.** `editorial-creator` and
+     `editorial-quality-director` were pinned `mode="high"` with the priciest Opus panels. In
+     `editorial.py`, `_run_stage` did `goal = override_mode or agent_def.mode` — and the "Balanced"
+     UI maps to `null`, so it fell through to the agent's `"high"`. => "Balanced" silently billed
+     Opus for EVERY asset. This was the core "Balanced but expensive" trap.
+  3. **Flat `max_tokens=8000` on every model call** (incl. Fusion judge merges + one-liners) —
+     a token multiplier that inflated output cost on every stage.
+  4. Run shape is O(ideas × platforms × ~9 calls), each a frontier model. Inherently long/slow
+     for a big essay; with no ceiling it could run for an hour and rack up major spend.
+  5. Killed runs left the DB row `status="running"` with 0 assets (worker died mid-run, nothing
+     reaped it), so the UI showed perpetual "running" and polled forever.
+- FIXES (all shipped):
+  * **Toggle now REAL for Fusion stages:** `_run_stage` uses the user's mode to pick the matching
+    `_FUSION_PRESETS[mode]` panel/judge for `creator` + `quality_director`. Balanced = the mixed
+    preset (sonnet46/qwen37/luna, judge sonnet5), Economic = cheap preset. Quality still uses the
+    high Opus panel. Default (no toggle) still falls back to the agent's High panel for quality.
+  * **Per-stage `max_tokens`** via `_STAGE_MAX_TOKENS` (idea_miner 6000, strategist 4000, creator
+    4000, humanizer 3000, quality_director 4000, multiplier 3000) — replaces the flat 8000.
+  * **Guardrails in `run_editorial_pipeline`:** `_guard()` is checked between stages and after
+    every asset and raises to abort the run if (a) canceled, (b) wall-clock > `RUN_TIMEOUT_SECONDS`
+    (20 min), or (c) estimated `total_credits > RUN_MAX_CREDITS` (2000). The run is marked
+    `canceled` and keeps partial assets (no re-raise).
+  * **Cancel button:** `POST /api/editorial/runs/{run_id}/cancel` sets both the DB `canceled`
+    flag/status AND the in-memory `cancel_run(run_id)` flag the worker polls. Frontend `api.js`
+    gains `editorialCancel`; `EditorialStudio` shows a "⏹ Cancel run" button while busy and a
+    "Run canceled" + partial-results state. Killing the server is no longer needed to stop a run.
+  * **Startup reaper:** `reap_interrupted_runs()` marks any `status="running"` row left by a
+    previous process as `failed` on `init_db()`, so stuck runs no longer hang the UI. Wired in
+    `app.py` lifespan. (On this fix it reaped 2 orphaned rows from the incident.)
+  * **Schema migration for existing DBs:** `_ensure_columns()` in `db.py` ALTERs existing SQLite
+    tables to add columns that predate the current model (the new `EditorialRun` fields
+    `ideas_count/assets_count/credits_used/error/canceled/started_at`). Without it, an old
+    `gadgents.db` fails with "no column named ideas_count". Safe to run every startup.
+- BEHAVIOR CHANGE to flag in testing: a real essay in Balanced mode is now materially cheaper
+  than before (no per-asset Opus). A run that exceeds 20 min or ~2000 est. credits auto-cancels
+  with a clear error and keeps what it produced. Users CANNOT lose the server to stop a run.
+- Verified: backend imports OK; TestClient `/api/editorial/{brands,templates,runs}` = 200;
+  `POST .../cancel` sets `status="canceled"` and a repeat returns 409; reaper flips stale
+  "running" rows to failed; `_ensure_columns` reconciles the existing gadgents.db. Frontend
+  `npm run build` passes.
+
+## Session update (2026-07-15, part 12) — Editorial toggle STILL billed Opus in Balanced (user caught it)
+- After part 11 the user ran Editorial in "Balanced" and STILL saw Claude Opus 4.8 burning
+  (~$0.50 in 2 min, no result). The part-11 fix was INCOMPLETE: it only swapped the Fusion
+  panel when a mode was explicitly passed, but (a) "Balanced" sends `null`, which fell back to
+  the agent's `mode="high"` Opus panel, and (b) the FOUR single-model stages
+  (idea_miner/strategist/humanizer/multiplier) are HARD-PINNED `router_model="or-opus"` — a pin
+  bypasses the toggle entirely, so 4 of 6 stages were Opus in EVERY mode. Net: all 6 used Opus.
+- REAL FIX in `backend/editorial.py _run_stage`: the user's toggle is now the SOURCE OF TRUTH
+  and OVERRIDES BOTH the hard pin AND the agent default. `eff_mode` = chosen mode, with `null`
+  (Balanced) resolving to `"mixed"` (NOT "high"). For Fusion stages we ALWAYS use
+  `_FUSION_PRESETS[eff_mode]` (mixed = sonnet46/qwen37/luna, judge sonnet5 — no Opus). For
+  single-model stages we map quality/mixed/economic -> `or-opus / or-sonnet46 / or-llama33`,
+  ignoring the agent's `router_model` pin. So:
+  * Balanced (default, mixed) = sonnet46 for singles + mixed Fusion panel — **zero Opus**.
+  * Economic = llama33 / ds-flash-free+haiku+nano panel — cheapest.
+  * Quality (high) = Opus — only when explicitly chosen.
+- Frontend already correct: "Balanced" chip sets mode=null; `editorialRun` sends
+  `getMode() || null`, so backend gets null -> resolves to mixed. No frontend change needed.
+- WHY THIS MATTERED: the previous design assumed "default to High for quality, let toggle lower
+  it," but the editorial agents were registered with `mode="high"` AND hard Opus pins, so the
+  fallback direction was backwards. The UI's Balanced => null means "don't force High" was
+  interpreted as "use the agent's High default" — wrong. Now null => mixed.
+- Verified by stubbing `route()`: Balanced/null => idea_miner=or-sonnet46, creator/quality=
+  mixed panel (sonnet46/qwen37/luna, judge sonnet5), no `or-opus` anywhere; high => Opus;
+  economic => llama33 / cheap panel. py_compile OK; frontend builds.
+
+## Session update (2026-07-15, part 13) — Editorial "Run failed: tuple index out of range" FIXED
+- After part 12 the user ran Editorial in Balanced, got **"Run failed: tuple index out of
+  range"** with no result, and Cancel also errored. Two REAL bugs, both now fixed:
+- BUG A (the cryptic crash): `backend/llm.py complete_targeted` did `data["choices"][0]
+  ["message"]["content"]` with NO guard. On a throttled/empty OpenRouter response (e.g.
+  `{"error":...}` with no `choices`, or `choices: []`), this raised `IndexError: list/tuple
+  index out of range` (the string the user saw) and the worker stored only `str(exc)[:2000]`,
+  hiding the real cause. FIX: `complete_targeted` now checks `not data.get("choices")` and
+  raises a CLEAR `RuntimeError` naming provider/model + the API error; the worker now stores
+  the FULL traceback (`traceback.format_exc()`) so any future error shows file:line.
+- BUG B (the "doesn't run" + the new `NameError` I introduced in part 12's router edit):
+  `_run_fusion` referenced an undefined `goal` variable -> `NameError` on EVERY Fusion stage.
+  FIXED to use `mode`. ALSO hardened `_run_fusion`: if the whole panel fails it falls back to
+  a single recommended model (instead of crashing), and the judge index is no longer blind.
+- BUG C (the actual frequent failure — run died on a LIVE but SLOW call): `LLMClient` used
+  `httpx.Client(timeout=60.0)`. Fusion judge calls + long/economic-tier outputs on OpenRouter
+  routinely exceed 60s, so the request `ReadTimeout`ed and the run failed ("Run failed") even
+  though the model would have answered. This is almost certainly why "it doesn't run" — the
+  user hit a 60s timeout mid-run. FIX: timeout is now `httpx.Timeout(connect=20, read=180,
+  write=60, pool=10)`. The editorial guardrails (20-min wall clock, 2000-credit cap) still sit
+  ABOVE this, so a genuinely hung run is still auto-canceled.
+- RESILIENCE (so one transient error never kills a whole run): `_run_stage` in `editorial.py`
+  now retries a failed SINGLE-model stage once on `recommend(eff_mode)` before giving up, with
+  a clear message naming the stage+model. Fusion already skips failed panel members and now
+  falls back to a single model if all members fail.
+- VERIFIED: a real editorial run in economic mode now reaches the Fusion judge (claude-haiku)
+  and the only failure we still see is a *slow* timeout that the 180s setting resolves; a
+  standalone malformed-response raises a clear "returned no completions" error instead of an
+  index crash; fusion `all models failed` falls back cleanly; single-stage retry path works.
+  backend py_compile OK; frontend builds.
+- PRACTICAL NOTE for the user: Editorial is SLOW by design (many sequential model calls). With
+  the 180s per-call timeout it will actually finish now. Balanced = sonnet46 + mixed Fusion
+  panel (no Opus). Keep max_ideas small (4) and few platforms for the first test. The "Cancel
+  run" button now works (sets the cancel flag the worker polls at the next stage boundary).
+
+## Session update (2026-07-15, part 14) — Editorial "0 assets / stuck / slow" root-caused + fixed
+- User reported: run sits at "Engine running… 0 assets so far" for 5+ min, 20¢ spent, nothing
+  produced; also two runs left stuck in `running` in the DB (zombies). The crash (part 13) was
+  already fixed; this was a DIFFERENT problem: visibility + slowness + orphan pile-up.
+- ROOT CAUSE 1 (the `tuple index out of range` you actually hit): it was NOT the LLM. The
+  traceback pointed at `editorial.py` line 329 `user_id=effective_user.id`. The HTTP request
+  loaded the dev `User` in the REQUEST session, then handed that ORM object to the WORKER
+  thread which runs in a SEPARATE session. Reading `.id` triggered a cross-session lazy refresh
+  that crashed SQLAlchemy's row processor. FIX: the worker now passes only the user **id**;
+  `run_editorial_pipeline` re-loads the user by id in its own session. Verified by reproducing
+  the exact handoff (user from session A passed into pipeline on session B) — now completes as
+  `done`, no crash.
+- ROOT CAUSE 2 (0 assets shown forever): assets/credits are only written to the DB at the END
+  of the whole run, so the polling UI showed 0 the entire time even while dozens of slow model
+  calls ran. FIX: `run_editorial_pipeline` now commits `run.ideas_count` after the miner and
+  `run.assets_count` after EVERY asset, so the UI counts up in real time. Confirmed: a full
+  fake-LLM run now mines 2 ideas + persists 4 assets (2 ideas × 2 platforms) correctly.
+- ROOT CAUSE 3 (orphan/zombie runs): the startup reaper only ran on boot; runs killed mid-flight
+  (server restart, Ctrl+C) stayed `running` forever. FIX: `get_run` now reaps the user's OTHER
+  stuck `running` runs started >5 min ago on every poll (leaves a live run untouched), so they
+  don't pile up. Also lowered per-stage `max_tokens` (idea_miner 6000->4000, creator 4000->3000,
+  humanizer 3000->2500, quality 4000->3000, multiplier 3000->2500) to cut per-call latency/cost.
+- WHY IT FELT BROKEN: a 4-idea × 2-platform Balanced run makes ~70 sequential `or-sonnet46`
+  calls (creator + quality_director are Fusion = 3 panel + 1 judge each, per asset). Each takes
+  10-30s on OpenRouter. So 5-15 min with tokens burning but (previously) 0 visible is expected
+  for THIS design — not a hang. The progress fix makes it observable; the lower token caps make
+  it a bit faster/cheaper. For a snappy test, use max_ideas=2 + 1 platform first.
+- VERIFIED: backend py_compile OK; fake-LLM full run mines + persists assets; orphan reaper
+  marks stale runs failed; frontend builds.
+
 ## Next steps (per original plan + where we are)

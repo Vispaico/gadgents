@@ -15,16 +15,28 @@ from backend.db import (
     get_or_create_dev_user,
 )
 from backend.llm import LLMClient
-from backend.editorial import run_editorial_pipeline, EDITORIAL_PLATFORMS
+from backend.editorial import (
+    run_editorial_pipeline,
+    EDITORIAL_PLATFORMS,
+    cancel_run,
+)
 
 router = APIRouter(prefix="/api/editorial", tags=["editorial"])
 
 _settings = get_settings()
 _llm = LLMClient()
 
+# Run the (potentially long, multi-call) editorial pipeline off the request thread so
+# the HTTP response returns immediately with a run_id. The frontend polls status instead
+# of blocking for minutes (which previously looked like a hang while tokens kept burning).
+from concurrent.futures import ThreadPoolExecutor
+
+_editorial_executor = ThreadPoolExecutor(max_workers=2)
+
 
 class EditorialOut(BaseModel):
     run_id: int
+    status: str
     brand: dict
     ideas_count: int
     selected_ideas: int
@@ -55,21 +67,170 @@ def run_editorial(
             select(BrandProfile).where(BrandProfile.is_default == True)  # noqa: E712
         ).first()
         brand_id = default_brand.id if default_brand else None
-    try:
-        result = run_editorial_pipeline(
-            session,
-            user,
-            essay,
-            brand_id,
-            platforms,
-            _llm,
-            mode=mode,
-            max_ideas=max_ideas,
-            run_multiplier=run_multiplier,
+
+    # Persist a run row immediately so the frontend can poll for status. The heavy
+    # pipeline runs on a worker thread; the HTTP call returns a run_id right away.
+    effective_user = user if user is not None else get_or_create_dev_user(session)
+    run = EditorialRun(user_id=effective_user.id, brand_id=brand_id or 0, essay_text=essay[:8000], status="running")
+    session.add(run)
+    session.commit()
+    session.refresh(run)
+    run_id = run.id
+    # Pass only the user id to the worker. Using the ORM User object loaded in THIS
+    # (request) session inside the worker's separate session causes SQLAlchemy to try
+    # a lazy refresh across sessions and crash ("tuple index out of range" in row
+    # processing). The worker re-loads the user by id in its own session instead.
+    effective_user_id = effective_user.id
+
+    def _worker():
+        # Own session + retry the DB operations outside the request session.
+        from sqlmodel import Session as _S
+        from backend.db import get_engine, User as _User
+        from backend.editorial import EditorialCanceled
+
+        with _S(get_engine()) as ws:
+            ws_user = ws.get(_User, effective_user_id) or get_or_create_dev_user(ws)
+            try:
+                run_editorial_pipeline(
+                    ws,
+                    ws_user,
+                    essay,
+                    brand_id,
+                    platforms,
+                    _llm,
+                    mode=mode,
+                    max_ideas=max_ideas,
+                    run_multiplier=run_multiplier,
+                )
+            except EditorialCanceled:
+                # The pipeline already marked the run "canceled" and saved partial work.
+                pass
+            except InsufficientCredits as exc:
+                r = ws.get(EditorialRun, run_id)
+                if r:
+                    r.status = "failed"
+                    r.error = f"Insufficient credits: {exc}"
+                    ws.add(r)
+                    ws.commit()
+            except Exception as exc:  # noqa: BLE001
+                import traceback as _tb
+
+                r = ws.get(EditorialRun, run_id)
+                if r:
+                    r.status = "failed"
+                    # Store the FULL traceback (file:line + message) so a hidden
+                    # IndexError/etc. is never reduced to a bare message.
+                    r.error = (str(exc) + "\n" + _tb.format_exc())[:4000]
+                    ws.add(r)
+                    ws.commit()
+
+    _editorial_executor.submit(_worker)
+
+    return {
+        "run_id": run_id,
+        "status": "running",
+        "brand": {"id": brand_id},
+        "ideas_count": 0,
+        "selected_ideas": 0,
+        "assets": [],
+        "multiplier_ip": [],
+        "credits_used": 0,
+        "remaining_credits": effective_user.credits if effective_user else 0,
+    }
+
+
+@router.get("/runs/{run_id}")
+def get_run(
+    run_id: int,
+    user: User = Depends(get_current_user) if _settings.require_login else None,
+    session: Session = Depends(get_session),
+):
+    if not _settings.require_login or user is None:
+        user = get_or_create_dev_user(session)
+    # Reap OTHER stuck runs (worker died / server restarted) so they don't pile up as
+    # perpetual "running". Only reap the current user's runs started >5 min ago and
+    # never canceled, leaving a live run untouched.
+    from datetime import datetime, timezone as _tz
+
+    cutoff = datetime.now(_tz.utc).timestamp() - 300
+    stale = session.exec(
+        select(EditorialRun).where(
+            EditorialRun.user_id == user.id,
+            EditorialRun.status == "running",
         )
-    except InsufficientCredits as exc:
-        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=str(exc))
-    return EditorialOut(**result)
+    ).all()
+    for r in stale:
+        ts = r.started_at.timestamp() if r.started_at else 0
+        if ts and ts < cutoff:
+            r.status = "failed"
+            r.error = "Run was interrupted (server restarted or worker died). Partial assets, if any, are kept."
+            session.add(r)
+    session.commit()
+    run = session.get(EditorialRun, run_id)
+    if run is None or run.user_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    brand = session.get(BrandProfile, run.brand_id)
+    assets = session.exec(
+        select(EditorialAsset).where(EditorialAsset.run_id == run_id)
+    ).all()
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "error": run.error,
+        "brand": {
+            "id": run.brand_id,
+            "name": brand.name if brand else "",
+            "link_url": brand.link_url if brand else "",
+        },
+        "ideas_count": run.ideas_count,
+        "selected_ideas": run.ideas_count,  # ideabank count == mined count
+        "assets_count": run.assets_count,
+        "credits_used": run.credits_used,
+        "remaining_credits": user.credits if user else 0,
+        "assets": [
+            {
+                "id": a.id,
+                "idea_ref": a.idea_ref,
+                "platform": a.platform,
+                "kind": a.kind,
+                "versions": _json_or_list(a.content),
+                "quality_score": a.quality_score,
+            }
+            for a in assets
+        ],
+        "multiplier_ip": [],  # populated in a future run if needed; kept for shape parity
+    }
+
+
+@router.post("/runs/{run_id}/cancel")
+def cancel_editorial_run(
+    run_id: int,
+    user: User = Depends(get_current_user) if _settings.require_login else None,
+    session: Session = Depends(get_session),
+):
+    """Request cancellation of a running editorial run. The worker checks the cancel
+    flag between stages, so it stops (keeping partial assets) without the user having
+    to kill the dev server — which would otherwise leave in-flight OpenRouter calls
+    billing in the background."""
+    if not _settings.require_login or user is None:
+        user = get_or_create_dev_user(session)
+    run = session.get(EditorialRun, run_id)
+    if run is None or run.user_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    if run.status not in ("running",):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Run is already {run.status}; nothing to cancel.",
+        )
+    # Mark canceled in the DB (so a fresh process / reload sees it) AND in the
+    # in-memory flag the worker polls. If this process isn't the one running the
+    # run, the startup reaper + the DB flag handle it on next launch.
+    run.canceled = True
+    run.status = "canceled"
+    session.add(run)
+    session.commit()
+    cancel_run(run_id)
+    return {"run_id": run_id, "status": "canceled"}
 
 
 @router.get("/runs")
