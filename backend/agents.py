@@ -310,9 +310,9 @@ agent(
     base_credits=12,
     fusion=True,
     # Purpose-tuned for video-prompt generation (creative + structured camera vocabulary):
-    # Aion leads visual narrative, DeepSeek-pro + OpenAI for structure, Llama for variety.
-    # Anthropic-free.
-    fusion_panel=["or-aion3", "or-ds-pro", "oa-sol", "or-llama33"],
+    # Aion-3.0-Mini leads visual narrative (full aion3 is too slow for the loop), DeepSeek-pro
+    # + OpenAI for structure, Llama for variety. Anthropic-free; judge = ds-pro (fast, reliable).
+    fusion_panel=["or-aion3-mini", "or-ds-pro", "oa-sol", "or-llama33"],
     fusion_judge="or-ds-pro",
     router_model=None,
     mode="high",
@@ -357,11 +357,12 @@ agent(
     system_prompt=_EDITORIAL_STAGE_PROMPTS["creator"],
     base_credits=12,
     fusion=True,
-    # Purpose-tuned: Aion-3.0 leads the narrative (storytelling/voice/tension), with
-    # Qwen, OpenAI Luna, and Llama 3.3 adding variety. Anthropic-free. The Quality/Cost
-    # toggle still overrides this with the matching global Eco/Balanced preset.
-    fusion_panel=["or-aion3", "or-qwen37", "oa-luna", "or-llama33"],
-    fusion_judge="or-aion3",
+    # Purpose-tuned: Aion-3.0-MINI leads the narrative voice (storytelling/tension) — the
+    # FULL aion3 is a slow multi-model system (~23s p50 E2E) and would make each per-asset
+    # Creator call take minutes, so it's kept OUT of this hot loop. Mini is 70 tps / ~14s,
+    # 5x faster + cheaper, same storytelling fit. Qwen/Luna/Llama add variety. Anthropic-free.
+    fusion_panel=["or-aion3-mini", "or-qwen37", "oa-luna", "or-llama33"],
+    fusion_judge="or-aion3-mini",
     router_model=None,
     mode="high",
     show_in_bots=False,
