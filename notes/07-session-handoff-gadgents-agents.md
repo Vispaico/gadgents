@@ -1044,4 +1044,45 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
 - VERIFIED: all modules py_compile; `TestClient` boot 200 on /api/editorial/{brands,runs}; POST
   /run returns 200 with run_id; watchdog reaps a dead-process/running-row to failed in <=15s.
 
+## Session update (2026-07-16, part 3) — worker died instantly (3rd root cause) + OpenRouter IS the blocker
+- USER reported "4 min running, only running, no api model called." Investigation found the
+  worker subprocess was GONE (ps showed no `editorial-run` process) but the row stayed
+  `status=running` at ideas=0 — the run_editorial subprocess launched via `multiprocessing.
+  Process(target=run_worker)` **died instantly when started from uvicorn's threadpool**. Repro
+  (POST via a real uvicorn on :8011) showed `proc=GONE` from 10s on, ideas=0, no API call.
+  Root cause: multiprocessing SPAWN re-imports __main__ and pickles the target; launched from a
+  worker thread under uvicorn this intermittently killed the child at spawn/import with no
+  traceback. FIX: switched the route to `subprocess.Popen([sys.executable, "-m",
+  "backend.editorial_worker", run_id, essay, brand_id, platforms_json, mode, max_ideas,
+  run_multiplier, user_id])`. A bare subprocess is a clean new interpreter, args are plain
+  strings (no pickle), and `Popen.kill()` = SIGKILL. Added a `__main__` entrypoint to
+  editorial_worker.py that parses argv and calls `run_worker`. VERIFIED on :8011: `proc=ALIVE`
+  now — the worker launches reliably. Watchdog updated to Popen methods (`poll()`, `wait()`,
+  `kill()`); cap lowered 12min -> 5min so a stall is killed + marked failed fast.
+- THE ACTUAL BLOCKER (external, not code): with the worker now launching, the run STILL sits at
+  ideas=0 because the **Idea Miner OpenRouter call stalls**. Proven by isolating the EXACT call
+  `route(llm, messages, model_id=<m>, fusion=False, max_tokens=8000)` with a hard SIGALRM:
+  * qwen37 miner: STALLED 70s. * aion3-mini miner: STALLED 70s. * ds-pro miner: succeeded once
+    (52.8s, 10k chars) then STALLED on retry. * ds-pro 5x retry: stall, stall, then cooldown
+    (the 2-failure/20s per-model cooldown kicks in). So OpenRouter is intermittently stalling the
+  LARGE miner request (full system prompt + essay + 8000 max_tokens) across ALL models RIGHT NOW;
+  short/prompt calls to the same models return in 3-8s. It is provider-side flakiness, not a bug.
+- IMPORTANT nuance on timeouts: SIGALRM DOES sometimes fire on these stalls (we saw "hard 70s"
+  raise), but NOT reliably inside the subprocess worker (run alive 300s past the 150s per-stage
+  alarm). So the watchdog SIGKILL at 5min is the reliable backstop; the per-stage SIGALRM is
+  best-effort. Net behavior now: a stalled run is auto-killed + marked `failed` within 5 min with
+  a clear "exceeded the hard process cap" message, OR the user hits Cancel (instant SIGKILL).
+- TEMPORARY model change: the single-model map `mixed` was `or-qwen37` (stalling) -> now `or-ds-pro`
+  (the model that completed the miner when others stalled). Quality also ds-pro; Economic llama33.
+  If OpenRouter's qwen37/aion3 stability returns, mixed can move back. This is a stopgap for the
+  current provider flakiness, not a permanent preference.
+- STATUS: code is correct and robust (worker launches, stalls are contained, killable, auto-fail
+  at 5min). A FULL SUCCESS run was still NOT observed because OpenRouter keeps stalling the miner
+  at this moment. The fix is to wait for OpenRouter to be responsive and retry (start small:
+  max_ideas=2, 1 platform, Balanced/Quality). No further code change can make a stalled external
+  API return.
+- VERIFIED: :8011 end-to-end — worker ALIVE after launch; run auto-failed at 310s ("exceeded the
+  hard process cap (5 min)") instead of hanging forever; Cancel SIGKILLs instantly; ds-pro miner
+  succeeded once in isolation (52.8s) proving the pipeline path is sound.
+
 ## Next steps (per original plan + where we are)

@@ -275,10 +275,16 @@ def _run_stage(
         return result, used_id or judge
     else:
         # Single-model stage: OVERRIDE the agent's hard pin with the per-mode model so
-        # Balanced/Economic are genuinely cheap. Anthropic-free: Quality -> ds-pro.
+        # Balanced/Economic are genuinely cheap. Anthropic-free.
+        # NOTE (2026-07-16): OpenRouter intermittently STALLS (half-open TLS, no response,
+        # un-killable by in-process timeouts) on qwen3.7-plus for large requests like the
+        # Idea Miner. DeepSeek-v4-pro (or-ds-pro) is currently the reliable model for those
+        # big calls, so 'mixed' uses it (Quality also uses ds-pro; only Economic drops to
+        # llama33). If a model stalls, the per-stage SIGALRM/retry + watchdog still abort the
+        # run rather than hanging forever. Revisit if OpenRouter's qwen37 stability returns.
         single_model = {
             "high": "or-ds-pro",
-            "mixed": "or-qwen37",
+            "mixed": "or-ds-pro",
             "economic": "or-llama33",
         }[eff_mode]
         try:

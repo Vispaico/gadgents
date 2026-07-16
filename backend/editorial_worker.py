@@ -24,6 +24,7 @@ Cancel endpoint can `process.kill()` a wedged run.
 from __future__ import annotations
 
 import signal
+import sys
 import traceback
 from typing import Optional
 
@@ -121,3 +122,41 @@ def _mark_failed(session: Session, run_id: int, error: str) -> None:
         r.error = error[:4000]
         session.add(r)
         session.commit()
+
+
+def _main(argv: list[str]) -> None:
+    """Console entrypoint: `python -m backend.editorial_worker <run_id> <essay>
+    <brand_id> <platforms_json> <mode> <max_ideas> <run_multiplier> <user_id>`.
+
+    Run as a SEPARATE PROCESS via subprocess.Popen (NOT multiprocessing) so we avoid
+    the spawn-from-worker-thread fragility: multiprocessing.spawn re-imports __main__
+    and pickles the target, which intermittently killed the worker instantly when
+    launched from uvicorn's threadpool (the run row was left 'running' forever with no
+    process and no API call). A bare subprocess is a clean new interpreter, takes args
+    as strings (no pickle), and we can SIGKILL it via Popen.kill()."""
+    import json
+
+    (
+        _rid,
+        _essay,
+        _brand_id,
+        _platforms_json,
+        _mode,
+        _max_ideas,
+        _run_multiplier,
+        _user_id,
+    ) = argv
+    run_worker(
+        run_id=int(_rid),
+        essay=_essay,
+        brand_id=int(_brand_id) if _brand_id not in (None, "None", "") else None,
+        platforms=json.loads(_platforms_json) if _platforms_json else [],
+        mode=_mode if _mode not in (None, "None", "") else None,
+        max_ideas=int(_max_ideas),
+        run_multiplier=_run_multiplier in ("True", "1", "true"),
+        user_id=int(_user_id),
+    )
+
+
+if __name__ == "__main__":
+    _main(sys.argv[1:])

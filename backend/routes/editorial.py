@@ -33,18 +33,19 @@ _settings = get_settings()
 # ignored by a blocked recv, so Cancel can `process.kill()` a wedged run instantly. The
 # HTTP response returns immediately with a run_id; the frontend polls status instead of
 # blocking for minutes (which previously looked like a hang while tokens kept burning).
-import multiprocessing
+import subprocess
+import sys
 import threading
 
-# Track live run processes so Cancel can kill a wedged one unblockably.
-_editorial_processes: dict[int, multiprocessing.Process] = {}
+# Track live run subprocesses so Cancel can kill a wedged one unblockably.
+_editorial_processes: dict[int, subprocess.Popen] = {}
 
 # Hard ceiling (seconds) a SINGLE editorial subprocess may live, even if it never hits a
 # stall we can detect. OpenRouter stalls are invisible to in-process timeouts, so if the
 # per-stage SIGALRM hasn't fired (it's best-effort), this watchdog SIGKILLs the process
 # and resolves the row. Kept generous but finite so a wedged run can NEVER hang the UI
 # forever — the user sees a failed run, not an eternal "Engine running…".
-_EDITORIAL_PROCESS_HARD_CAP_S = 12 * 60  # 12 minutes
+_EDITORIAL_PROCESS_HARD_CAP_S = 5 * 60  # 5 minutes
 
 
 def _editorial_watchdog() -> None:
@@ -62,7 +63,7 @@ def _editorial_watchdog() -> None:
             dead: list[int] = []
             for rid, proc in list(_editorial_processes.items()):
                 try:
-                    if not proc.is_alive():
+                    if proc.poll() is not None:
                         # Child ended (crashed, killed, or finished). If the row is still
                         # 'running' it was left orphaned — resolve it as failed so the UI
                         # never shows a permanent spinner. (A clean finish writes 'done'
@@ -84,7 +85,7 @@ def _editorial_watchdog() -> None:
                         # Over the hard cap and still alive: almost certainly stalled. Kill.
                         try:
                             proc.kill()
-                            proc.join(timeout=3)
+                            proc.wait(timeout=3)
                         except Exception:
                             pass
                         with _S(get_engine()) as ws:
@@ -164,30 +165,29 @@ def run_editorial(
     # processing). The worker re-loads the user by id in its own session instead.
     effective_user_id = effective_user.id
 
-    # Run in a SEPARATE PROCESS (not a thread). The subprocess main thread can receive
-    # SIGALRM, so the per-stage hard timeout inside run_editorial_pipeline actually
-    # interrupts a stalled OpenRouter recv (a thread never could), and Cancel can
-    # SIGKILL the process to stop a wedged run unblockably. The target MUST be a
-    # module-level function (not a local closure) so multiprocessing can pickle it for
-    # the spawn/fork handoff; all args are plain ints/strs/lists and are picklable.
-    from backend.editorial_worker import run_worker
+    # Run in a SEPARATE PROCESS (see subprocess.Popen launch below) so a stalled OpenRouter
+    # recv can be SIGKILLed unblockably, and the per-stage SIGALRM in editorial.py can fire
+    # from the worker's main thread.
 
-    proc = multiprocessing.Process(
-        target=run_worker,
-        name=f"editorial-run-{run_id}",
-        daemon=True,
-        args=(
-            run_id,
-            essay,
-            brand_id,
-            platforms,
-            mode,
-            max_ideas,
-            run_multiplier,
-            effective_user_id,
-        ),
-    )
-    proc.start()
+    # Launch as a CLEAN subprocess via subprocess.Popen (NOT multiprocessing). multiprocessing
+    # spawn re-imports __main__ and pickles the target, which intermittently killed the worker
+    # INSTANTLY when launched from uvicorn's threadpool — the run row was left 'running' forever
+    # with no process and no API call (the "4 min, nothing happens" bug). A bare subprocess is a
+    # fresh interpreter, takes args as strings (no pickle), and Popen.kill() SIGKILLs it.
+    import json
+
+    cmd = [
+        sys.executable, "-m", "backend.editorial_worker",
+        str(run_id),
+        essay,
+        str(brand_id if brand_id is not None else ""),
+        json.dumps(platforms or []),
+        mode or "",
+        str(max_ideas),
+        str(bool(run_multiplier)),
+        str(effective_user_id),
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     proc._start_time = time.time()
     _editorial_processes[run_id] = proc
 
@@ -312,9 +312,12 @@ def cancel_editorial_run(
     # run wedged in a stalled OpenRouter recv (the only reliable kill for that case) --
     # killing the server was previously the only way, which still leaked in-flight calls.
     proc = _editorial_processes.pop(run_id, None)
-    if proc is not None and proc.is_alive():
+    if proc is not None and proc.poll() is None:
         proc.kill()
-        proc.join(timeout=2)
+        try:
+            proc.wait(timeout=2)
+        except Exception:
+            pass
     return {"run_id": run_id, "status": "canceled"}
 
 
