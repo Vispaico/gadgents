@@ -286,6 +286,7 @@ agent(
     router_model="or-sonnet46",   # balanced; the heavy lifting is in the chain, not here
     mode="mixed",
     production_ready=True,
+    show_in_bots=False,  # surfaced as the dedicated "Lead Finder" nav tab, not a bare bot card
 )
 
 

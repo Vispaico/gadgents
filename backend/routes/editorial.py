@@ -19,6 +19,7 @@ from backend.editorial import (
     run_editorial_pipeline,
     EDITORIAL_PLATFORMS,
     cancel_run,
+    RUN_TIMEOUT_SECONDS,
 )
 
 router = APIRouter(prefix="/api/editorial", tags=["editorial"])
@@ -148,20 +149,25 @@ def get_run(
     if not _settings.require_login or user is None:
         user = get_or_create_dev_user(session)
     # Reap OTHER stuck runs (worker died / server restarted) so they don't pile up as
-    # perpetual "running". Only reap the current user's runs started >5 min ago and
-    # never canceled, leaving a live run untouched.
+    # perpetual "running". Never reap the run the caller is actively polling, and use a
+    # correct UTC comparison: started_at is stored naive but represents UTC, so treat it
+    # as UTC (not local time) to avoid timezone-offset false positives that would mark a
+    # brand-new run failed instantly. The grace window matches RUN_TIMEOUT_SECONDS so a
+    # slow-but-healthy run (the pipeline can take 5-15 min) is never reaped mid-flight.
     from datetime import datetime, timezone as _tz
 
-    cutoff = datetime.now(_tz.utc).timestamp() - 300
+    now = datetime.now(_tz.utc)
     stale = session.exec(
         select(EditorialRun).where(
             EditorialRun.user_id == user.id,
             EditorialRun.status == "running",
+            EditorialRun.id != run_id,
         )
     ).all()
     for r in stale:
-        ts = r.started_at.timestamp() if r.started_at else 0
-        if ts and ts < cutoff:
+        started = r.started_at.replace(tzinfo=_tz.utc) if r.started_at else None
+        age = (now - started).total_seconds() if started else 0
+        if age > RUN_TIMEOUT_SECONDS and not r.canceled:
             r.status = "failed"
             r.error = "Run was interrupted (server restarted or worker died). Partial assets, if any, are kept."
             session.add(r)

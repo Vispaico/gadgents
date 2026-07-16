@@ -119,7 +119,22 @@ class LLMClient:
                 )
                 resp.raise_for_status()
                 data = resp.json()
+                if not isinstance(data, dict) or not data.get("choices"):
+                    detail = ""
+                    if isinstance(data, dict) and data.get("error"):
+                        detail = f" API error: {data['error']}"
+                    raise RuntimeError(
+                        f"{provider}/{resolved_model} returned no completions "
+                        f"(status {resp.status_code}).{detail}"
+                    )
                 choice = data["choices"][0]["message"]["content"]
+                if not choice:
+                    # OpenRouter/OpenAI sometimes return null/empty content on a refusal
+                    # or filtered response. A None here would later crash len()/json.loads
+                    # downstream; treat it as a failed completion so fallback/retry kicks in.
+                    raise RuntimeError(
+                        f"{provider}/{resolved_model} returned an empty (null) completion."
+                    )
                 usage = data.get("usage", {})
                 self._health[provider].failures = 0
                 return CompletionResult(
@@ -179,6 +194,12 @@ class LLMClient:
                     f"{provider}/{model} returned no completions (status {resp.status_code}).{detail}"
                 )
             choice = data["choices"][0]["message"]["content"]
+            if not choice:
+                # Null/empty content (refusal / filtered) — treat as a failure so it hits
+                # fallback/retry rather than poisoning downstream len()/json.loads.
+                raise RuntimeError(
+                    f"{provider}/{model} returned an empty (null) completion."
+                )
             usage = data.get("usage", {})
             self._health[provider].failures = 0
             return CompletionResult(

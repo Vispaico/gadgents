@@ -242,11 +242,30 @@ def _run_fusion(
         judge_entry = get_model(answers[0][0]) or _BY_ID.get(panel_ids[0]) or MODEL_CATALOG[0]
     synthesis_prompt = _build_judge_prompt(answers)
     judge_messages = messages + [{"role": "user", "content": synthesis_prompt}]
-    result = llm.complete_targeted(
-        judge_entry.provider, judge_entry.model, judge_messages,
-        temperature=temperature, max_tokens=max_tokens,
-    )
-    return result.text, f"fusion:{judge_entry.id}"
+    try:
+        result = llm.complete_targeted(
+            judge_entry.provider, judge_entry.model, judge_messages,
+            temperature=temperature, max_tokens=max_tokens,
+        )
+    except Exception:
+        # The panel answers are already good; don't kill the whole run (and waste the
+        # credits already spent) just because the judge model hiccupped (e.g. a null/
+        # empty completion, throttle, or a 500). Retry on the first panel answer's model
+        # (it just succeeded), then fall back to returning that answer unchanged.
+        fb_id = answers[0][0]
+        fb_entry = get_model(fb_id)
+        if fb_entry is not None and fb_entry is not judge_entry:
+            try:
+                result = llm.complete_targeted(
+                    fb_entry.provider, fb_entry.model, judge_messages,
+                    temperature=temperature, max_tokens=max_tokens,
+                )
+                return result.text, f"fusion:{fb_entry.id}"
+            except Exception:
+                pass
+        # Last resort: return the best panel answer so the editorial stage still gets
+        # usable content instead of a crash.
+        return answers[0][1], f"fusion:{fb_id}"
 
 
 def _build_judge_prompt(answers: list[tuple[str, str]]) -> str:

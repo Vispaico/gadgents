@@ -101,7 +101,10 @@ _CANCELLED: set[int] = set()
 # for small assets. Most stages need far less; the Quality Director (a single asset
 # rewrite) is the only place that occasionally needs more.
 _STAGE_MAX_TOKENS: dict[str, int] = {
-    "idea_miner": 4000,    # 25-50 short ideas as JSON; 4k is plenty (was 6k = slow + costly)
+    # The miner is asked for 25-50 short ideas as one JSON object; that is ~6000-8000
+    # output tokens. A 4000 ceiling hard-truncates the reply mid-array (the "Idea Miner
+    # returned no usable ideas" failure). Do NOT lower this below what the prompt demands.
+    "idea_miner": 8000,
     "strategist": 3000,
     "creator": 3000,       # per-platform asset (4 versions) rarely needs more than 3k
     "humanizer": 2500,
@@ -203,6 +206,11 @@ def _run_stage(
             judge=preset["judge"],
             max_tokens=mt,
         )
+        if not result:
+            raise RuntimeError(
+                f"Editorial stage '{stage}' returned an empty reply (the fusion panel "
+                "and fallback produced no content)."
+            )
         return result, used_id or (preset["judge"])
     else:
         # Single-model stage: OVERRIDE the agent's hard Opus pin with the per-mode model
@@ -221,6 +229,12 @@ def _run_stage(
                 fusion=False,
                 max_tokens=mt,
             )
+            if not result:
+                # Empty/None reply: raise so the retention/retry below swaps to a fallback
+                # model instead of passing None downstream into len()/json.loads.
+                raise RuntimeError(
+                    f"Editorial stage '{stage}' returned an empty reply from {single_model}."
+                )
             return result, used_id or single_model
         except Exception as exc:
             # A single transient provider/model failure shouldn't kill the whole run.
@@ -278,23 +292,50 @@ def _brand_block(brand: BrandProfile) -> str:
 
 
 def _safe_json(text: str) -> Optional[dict]:
-    """Parse a model's JSON reply, tolerating ```json fences."""
+    """Parse a model's JSON reply, tolerating ```json fences and truncate mid-object.
+
+    Models are occasionally hard-cut at max_tokens, leaving an unterminated JSON object
+    or array. We try the strict parse first, then a "best-effort" salvage that closes any
+    open brackets and recovers whatever objects were fully present (so a Partial Idea Miner
+    reply still yields ideas instead of failing the whole run)."""
     t = text.strip()
     if t.startswith("```"):
         t = t.split("```", 2)[1]
         if t.lower().startswith("json"):
             t = t[4:]
+    t = t.strip()
     try:
         return json.loads(t)
     except json.JSONDecodeError:
-        # Last resort: grab the first {...} span.
-        start = t.find("{")
-        end = t.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            try:
-                return json.loads(t[start : end + 1])
-            except json.JSONDecodeError:
-                return None
+        pass
+    # Best-effort: truncate at the last complete top-level object inside the array/object
+    # and re-balance brackets, then parse. This recovers items emitted before truncation.
+    salvaged = _rescue_json(t)
+    if salvaged is not None:
+        return salvaged
+    return None
+
+
+def _rescue_json(t: str) -> Optional[dict]:
+    """Try to recover a parsable dict even when the reply was cut off mid-array/object.
+
+    Truncate at the final complete `}` (i.e. the last fully-emitted item), then re-balance
+    any still-open containers by appending closing `]`/`}`. Returns None if that doesn't parse."""
+    start = t.find("{")
+    if start == -1:
+        return None
+    t = t[start:]
+    cut = t.rfind("}")
+    if cut == -1:
+        return None
+    chunk = t[: cut + 1]
+    # Close any still-open containers ([ needs ], { needs }).
+    depth_brace = chunk.count("{") - chunk.count("}")
+    depth_brack = chunk.count("[") - chunk.count("]")
+    chunk = chunk + "]" * max(0, depth_brack) + "}" * max(0, depth_brace)
+    try:
+        return json.loads(chunk)
+    except json.JSONDecodeError:
         return None
 
 
@@ -302,7 +343,7 @@ def _estimate_credits(agent_id: str, text: str) -> int:
     """Mirror run_agent's credit estimate (base + ~1 per 4000 chars generated)."""
     agent_def = get_agent(agent_id)
     base = agent_def.base_credits if agent_def else 8
-    return base + max(1, len(text) // 4000)
+    return base + max(1, len(text or "") // 4000)
 
 
 def run_editorial_pipeline(
@@ -582,6 +623,12 @@ def run_editorial_pipeline(
     except Exception as exc:
         run.status = "failed"
         run.error = str(exc)[:2000]
+        # Persist whatever progress + credits were spent so far, so a failed run reports
+        # its real (partial) cost instead of 0 — otherwise money was clearly burned but
+        # the DB shows nothing was charged.
+        run.ideas_count = len(ideas)
+        run.assets_count = len(assets)
+        run.credits_used = total_credits
         session.add(run)
         session.commit()
         if isinstance(exc, InsufficientCredits):

@@ -31,9 +31,13 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # Backend
+# NOTE: do NOT use --reload here. The editorial pipeline runs as a background worker
+# thread that can take many minutes; --reload restarts the worker on any file change
+# (editor autosave, __pycache__ writes) and KILLS in-flight runs, leaving them orphaned
+# ("Run was interrupted"). For code changes, restart dev.sh manually.
 source .venv/bin/activate
 echo "▶ Starting backend on http://localhost:8000"
-uvicorn backend.app:app --port 8000 --reload &
+uvicorn backend.app:app --port 8000 &
 BACKEND_PID=$!
 
 # Frontend

@@ -715,4 +715,105 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
 - VERIFIED: backend py_compile OK; fake-LLM full run mines + persists assets; orphan reaper
   marks stale runs failed; frontend builds.
 
+## Session update (2026-07-15, part 15) — Editorial reaper was killing runs; fixed + leftover servers killed
+- After part 14 the UI still showed every Editorial run dying at ideas=0 immediately, even though
+  `started_at` was populated. Root cause was the FAIL-POSITIVE reaper inside `get_run`
+  (`backend/routes/editorial.py`), NOT the worker:
+  1. TIMEZONE BUG: `r.started_at.timestamp()` treats the stored **naive-UTC** datetime as
+     **LOCAL** time, while `datetime.now(timezone.utc).timestamp()` is true UTC. On a non-UTC Mac
+     that offset made a brand-new run appear older than the 300s cutoff → marked `failed` at t≈0.
+  2. WRONG GRACE: the 5-min cutoff was SHORTER than a normal run (5-15 min), so even a correct
+     comparison would reap healthy runs mid-flight at 5 min.
+- FIX (`get_run` reaper): (a) both sides now UTC-aware — `started_at.replace(tzinfo=utc)` vs
+  `datetime.now(utc)` — so the comparison is correct; (b) grace raised to `RUN_TIMEOUT_SECONDS`
+  (20 min), matching the pipeline's own wall-clock deadline, so a slow-but-alive run is never
+  reaped; (c) the stale query now excludes `EditorialRun.id != run_id`, so the run you're actively
+  polling is never reaped; (d) imported `RUN_TIMEOUT_SECONDS` from `backend/editorial.py`.
+- HOUSEKEEPING: killed the two leftover dev servers from the earlier bug-fixing chat (uvicorn PID
+  90206 + `npm run dev` + both vite instances on :5173/:5174). Ports 8000/5173/5174 confirmed free.
+  DB had 0 stuck `running` rows (the part-11 startup reaper had already cleaned them).
+- VERIFIED: backend py_compile OK; ports free; DB has no zombies. Editorial is safe to poll again.
+
+## Session update (2026-07-15, part 16) — FIX "Idea Miner returned no usable ideas" (max_tokens truncation)
+- After part 15 the run failed with: `Idea Miner returned no usable ideas (model reply was empty
+  or not valid JSON)`. Reproduced the live Idea Miner call (Balanced, `or-sonnet46`): it returned
+  a valid ```` ```json ```` block of 25-50 ideas (~15k chars ≈ 4k+ output tokens) that was
+  **HARD-TRUNCATED mid-array** (cut off at idea #36 of ~50) because part 14 had lowered the
+  `idea_miner` `max_tokens` to **4000** "to cut latency". At 4000 tokens the reply was cut before
+  the array closed, so `_safe_json` returned `{"ideas": []}` → the fail-fast guard raised and the
+  whole run aborted. Classic: part 14's latency tweak broke the miner for its requested volume.
+- FIX 1 (capacity): restored `idea_miner` `max_tokens` to **8000** in `_STAGE_MAX_TOKENS` (the part-9
+  value verified to fit 50-idea JSON). The other lowered caps (creator 3000, humanizer 2500,
+  quality 3000, multiplier 2500) are fine — only the miner needs the headroom for 25-50 ideas.
+- FIX 2 (defense in depth): `_safe_json` is now **truncation-tolerant**. New `_rescue_json()`
+  closes any still-open `[`/`{` brackets and recovers every fully-emitted item, so a rare
+  partially-cut reply still yields ideas (e.g. a reply cut after idea #36 now yields 36 ideas)
+  instead of failing the whole run. Verified: a truncated 3-idea string recovers all 3; a clean
+  reply is unaffected.
+- BEHAVIOR: a normal Balanced run now mines its full idea list. Even if a future reply is cut, the
+  run proceeds with the partial ideas rather than erroring. No charge-for-empty-run because the
+  part-9 guard still fires only when ZERO ideas parse.
+- VERIFIED: backend py_compile OK; `_safe_json` recovers truncated input (1 idea on a synthetic
+  mid-object cut, 3 of 3 on a realistic trailing-comma cut, clean reply unaffected).
+
+## Session update (2026-07-15, part 17) — FIX "object of type 'NoneType' has no len()" crash
+- After part 16 the run ran LONG, burned money, then failed with:
+  `TypeError: object of type 'NoneType' has no len()` at `len(text) // 4000` inside
+  `_estimate_credits("editorial-creator", creator_text)`. `creator_text` was `None`.
+- ROOT CAUSE: `backend/llm.py` `complete_targeted` read
+  `data["choices"][0]["message"]["content"]` directly. When OpenRouter/OpenAI returns a completion
+  with `content: null` (a refusal / content-filtered response), `CompletionResult.text` became
+  `None`. That `None` flowed into `creator_text`, and `len(None)` crashed **mid-run** — AFTER every
+  prior stage had already burned credits. Same latent gap existed in `complete()` (the batch path).
+- FIX (defense in depth):
+  * `backend/llm.py`: BOTH `complete` and `complete_targeted` now raise a CLEAR `RuntimeError`
+    (`"... returned an empty (null) completion."`) on `null`/empty content, so it hits the existing
+    fallback/retry path (single-model stages retry on `recommend(eff_mode)`; fusion skips the member
+    / falls back to a single model) INSTEAD of poisoning downstream `len()`/`json.loads`.
+  * `backend/editorial.py _run_stage`: both the Fusion and single-model branches now REJECT an
+    empty/None reply (raise `"... returned an empty reply ..."`); the single-model branch's raise
+    triggers its existing fallback-model retry. So the pipeline can never silently pass `None` on.
+  * `backend/editorial.py _estimate_credits`: now does `len(text or "")` — never crashes on `None`.
+- VERIFIED: `complete_targeted` with a mocked `content: null` reply now raises the clear message
+  (caught + asserted); `_estimate_credits(None)` returns a sane base (13) instead of crashing;
+  backend py_compile OK for `llm.py` + `editorial.py`.
+- PRACTICAL NOTE: this crash was independent of the part-16 truncation fix. With all three (parts
+  15-17) in, a Balanced Editorial run should now: not be reaped on poll, mine its full idea list,
+  and fail fast with a CLEAR message (and a fallback-model retry) if any model returns empty rather
+  than crashing mid-run after burning money. Start with max_ideas=4 + 1-2 platforms for the test.
+
+## Session update (2026-07-15, part 18) — FIX Editorial still dying on Fusion JUDGE null + 0-credit report
+- User ran Editorial again (Balanced). It mined 45 ideas fine, then failed at the FIRST Creator
+  asset with: `openrouter/anthropic/claude-sonnet-5 failed: ... returned an empty (null)
+  completion.` So run 51 burned the Idea Miner + Strategist + Creator-panel calls, then died.
+- ROOT CAUSE: in `_run_fusion` (`backend/router.py`) the **judge** call had NO fallback. The panel
+  loop already had skip-and-fallback resilience, but the judge call was a single shot:
+  `llm.complete_targeted(judge)` and return. When the MIXED judge `or-sonnet5`
+  (`anthropic/claude-sonnet-5`) returns a null/empty completion (content filter / throttled /
+  model id flaky), the WHOLE fusion raises and the ENTIRE editorial run aborts — even though the
+  3 panel answers were perfectly good. Net: a flaky judge = the run dies mid-way after spending on
+  every prior stage. (Earlier runs 49/50 hit the part-17 `len(None)` crash on the same kind of
+  null reply before the part-17 guard, and run 47 the part-16 miner truncation.)
+- FIX (`backend/router.py _run_fusion`): the judge call is now wrapped in try/except with the SAME
+  resilience as the panel: (1) retry on the FIRST panel answer's model (it just succeeded); (2) if
+  that also fails, return that panel answer UNCHANGED as the final text (`used = fusion:<panel>`).
+  So a failing judge can no longer kill the run or waste the credits already spent — the stage gets
+  usable content (the strongest panel answer) and the pipeline proceeds. Verified with a mock where
+  `or-sonnet5` returns a null completion: fusion returns `answer-from-claude-sonnet-4.6` (the first
+  panel member) instead of crashing.
+- FIX 2 (money visibility): a run that burns money then FAILS reported `credits_used = 0` in the DB,
+  because `run.credits_used`/`assets_count` were only stamped on SUCCESS. That hid the real cost of
+  a failed run (looked like "nothing charged"). The failure `except` block now persists
+  `run.ideas_count`, `run.assets_count`, `run.credits_used = total_credits` before marking failed,
+  so a failed run shows its TRUE partial cost. (Reminder: Editorial never deducts in dev-bypass
+  mode, so `credits_used` is an ESTIMATE; but it was wrongly 0 before this fix.)
+- BEHAVIOR: Balanced now proceeds end-to-end even if the `or-sonnet5` judge hiccups (falls back to
+  the panel answer). The MIXED preset is sonnet46/qwen37/luna panel + `or-sonnet5` judge — the judge
+  is the only Opus-free model in the path; if it stays flaky, consider swapping the mixed judge to
+  `or-sonnet46` (already in the panel) for extra stability. Left as-is for now since the fallback
+  covers it.
+- VERIFIED: `backend/router.py` + `backend/editorial.py` py_compile OK; imports OK; fusion judge
+  null-completion fallback returns usable panel content (no crash); credit-persist-on-failure edit
+  in place. Frontend `npm run build` not re-run (no frontend change).
+
 ## Next steps (per original plan + where we are)
