@@ -356,11 +356,14 @@ agent(
     description="For ONE idea, creates platform-native assets (LinkedIn/FB/IG/X/Newsletter/YT Shorts/Long/Podcast + Quotes/Hooks/Questions/Predictions), 4 versions each.",
     system_prompt=_EDITORIAL_STAGE_PROMPTS["creator"],
     base_credits=12,
-    fusion=True,
-    # Purpose-tuned: Aion-3.0-MINI leads the narrative voice (storytelling/tension) — the
-    # FULL aion3 is a slow multi-model system (~23s p50 E2E) and would make each per-asset
-    # Creator call take minutes, so it's kept OUT of this hot loop. Mini is 70 tps / ~14s,
-    # 5x faster + cheaper, same storytelling fit. Qwen/Luna/Llama add variety. Anthropic-free.
+    # SINGLE-MODEL on purpose: this stage runs once PER ASSET in the per-idea x per-platform
+    # loop, so Fusion (4 panel + judge, ~100s) would make a run cost minutes per asset and
+    # blow the 20-min guardrail before a single asset commits. A single strong model keeps
+    # each Creator call to ~30s while the agent's storytelling SYSTEM PROMPT preserves the
+    # Aion-voice output. The Quality/Cost toggle still drives the model (Quality->ds-pro,
+    # Balanced->qwen37, Economic->llama33) via _run_stage, so the toggle stays meaningful.
+    # (fusion_panel/judge retained for reference only; not used when fusion=False.)
+    fusion=False,
     fusion_panel=["or-aion3-mini", "or-qwen37", "oa-luna", "or-llama33"],
     fusion_judge="or-aion3-mini",
     router_model=None,
@@ -384,10 +387,11 @@ agent(
     description="Scores each asset 1-10 across 14 dimensions; rewrites until it hits >=9.5.",
     system_prompt=_EDITORIAL_STAGE_PROMPTS["quality_director"],
     base_credits=10,
-    fusion=True,
-    # Purpose-tuned: structured/scoring work needs reliable JSON + reasoning, so a
-    # DeepSeek-pro + OpenAI + Qwen + Llama mix (NO storytelling Aion here — scoring is
-    # analytical). Anthropic-free. Quality/Cost toggle can still override per mode.
+    # SINGLE-MODEL on purpose: like the Creator, this runs once PER ASSET in the hot loop.
+    # Fusion here (~95s) was the other half of the "burn tokens, get no assets" trap. A
+    # single strong model (~20-30s) scores/rewrites fast enough that assets commit in real
+    # time and a run actually finishes. Toggle still drives the model via _run_stage.
+    fusion=False,
     fusion_panel=["or-ds-pro", "oa-sol", "or-qwen37", "or-llama33"],
     fusion_judge="or-ds-pro",
     router_model=None,

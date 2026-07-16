@@ -163,6 +163,10 @@ class LLMClient:
                 self._mark_failure(provider, resolved_model)
         raise RuntimeError(f"All LLM providers failed. Last error: {last_error}")
 
+    def _post_with_deadline(self, *args, **kwargs) -> "httpx.Response":
+        """POST through the shared client (httpx enforces connect/read/write timeouts)."""
+        return self._client.post(*args, **kwargs)
+
     def close(self) -> None:
         self._client.close()
 

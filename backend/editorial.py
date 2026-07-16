@@ -20,6 +20,8 @@ Orchestration shape (mirrors backend/pipeline.py but with a loop):
 from __future__ import annotations
 
 import json
+import signal
+import threading
 import time
 from typing import Optional
 
@@ -89,6 +91,51 @@ RUN_TIMEOUT_SECONDS = 20 * 60  # 20 minutes
 # circuit breaker so a misbehaving chain can never blow the whole balance. Mirrors
 # the per-stage estimate in _estimate_credits (base + ~1 per 4000 chars generated).
 RUN_MAX_CREDITS = 2000
+
+
+# Per-stage hard timeout (seconds). OpenRouter intermittently stalls a connection
+# (accepts the request but never streams a response and never closes). On
+# CPython/macOS a socket stuck in ssl.recv for a half-open connection is NOT
+# interruptible by httpx/socket timeouts or a worker-thread future, so it blocks
+# forever and burns tokens. A per-stage SIGALRM is the reliable kill — but only
+# when _run_stage executes in the MAIN thread (the editorial subprocess worker
+# runs it there; the route runs the pipeline in a separate process for exactly
+# this reason). In a worker thread the alarm can't interrupt the recv, but the
+# subprocess can still be SIGKILLed by Cancel. 150s covers a slow-but-live call
+# (healthy calls are <=140s); anything longer is a stall we must abort.
+_STAGE_HARD_TIMEOUT_S = 150
+
+
+class _StageTimeout:
+    """Context manager that arms a SIGALRM for the duration of one stage.
+
+    Only effective when running in the main thread (subprocess worker). Harmless
+    otherwise. Re-armed per stage so a slow healthy stage (e.g. a 137s miner)
+    does not cannibalize the budget of the next stage."""
+
+    def __enter__(self):
+        try:
+            if threading.current_thread() is threading.main_thread():
+                signal.signal(signal.SIGALRM, _stage_alarm_handler)
+                signal.alarm(_STAGE_HARD_TIMEOUT_S)
+        except (ValueError, OSError):
+            pass  # not in main thread / signal unsupported here
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            signal.alarm(0)
+        except (ValueError, OSError):
+            pass
+        return False
+
+
+def _stage_alarm_handler(signum, frame):
+    raise TimeoutError(
+        f"Editorial stage exceeded the {_STAGE_HARD_TIMEOUT_S}s hard timeout "
+        "(provider stalled). Aborting run to stop token burn."
+    )
+
 
 # In-memory set of run_ids that the user (or the guardrail) has asked to cancel.
 # Editorial runs execute on a worker thread; the worker checks this flag between
@@ -181,6 +228,8 @@ def _run_stage(
         raise EditorialCanceled(run_id)
 
     agent_def = get_agent(_STAGE_AGENT[stage])
+    _stage_timeout = _StageTimeout()
+    _stage_timeout.__enter__()
     system_prompt = _stage_system_prompt(session, stage)
     messages: list[OpenAIChatMessage] = [
         {"role": "system", "content": system_prompt},
@@ -217,10 +266,12 @@ def _run_stage(
             max_tokens=mt,
         )
         if not result:
+            _stage_timeout.__exit__(None, None, None)
             raise RuntimeError(
                 f"Editorial stage '{stage}' returned an empty reply (the fusion panel "
                 "and fallback produced no content)."
             )
+        _stage_timeout.__exit__(None, None, None)
         return result, used_id or judge
     else:
         # Single-model stage: OVERRIDE the agent's hard pin with the per-mode model so
@@ -242,9 +293,11 @@ def _run_stage(
             if not result:
                 # Empty/None reply: raise so the retention/retry below swaps to a fallback
                 # model instead of passing None downstream into len()/json.loads.
+                _stage_timeout.__exit__(None, None, None)
                 raise RuntimeError(
                     f"Editorial stage '{stage}' returned an empty reply from {single_model}."
                 )
+            _stage_timeout.__exit__(None, None, None)
             return result, used_id or single_model
         except Exception as exc:
             # A single transient provider/model failure shouldn't kill the whole run.
@@ -253,6 +306,7 @@ def _run_stage(
 
             fb = recommend(eff_mode)
             if fb.id == single_model:
+                _stage_timeout.__exit__(None, None, None)
                 raise RuntimeError(
                     f"Editorial stage '{stage}' failed on {single_model}: {exc}"
                 )
@@ -265,8 +319,10 @@ def _run_stage(
                     fusion=False,
                     max_tokens=mt,
                 )
+                _stage_timeout.__exit__(None, None, None)
                 return result, used_id or fb.id
             except Exception as exc2:
+                _stage_timeout.__exit__(None, None, None)
                 raise RuntimeError(
                     f"Editorial stage '{stage}' failed on {single_model} "
                     f"(and fallback {fb.id}): {exc} | {exc2}"

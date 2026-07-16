@@ -3,7 +3,6 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from backend.auth import get_current_user
-from backend.billing import InsufficientCredits
 from backend.config import get_settings
 from backend.db import (
     User,
@@ -14,9 +13,7 @@ from backend.db import (
     PromptTemplate,
     get_or_create_dev_user,
 )
-from backend.llm import LLMClient
 from backend.editorial import (
-    run_editorial_pipeline,
     EDITORIAL_PLATFORMS,
     cancel_run,
     RUN_TIMEOUT_SECONDS,
@@ -25,14 +22,19 @@ from backend.editorial import (
 router = APIRouter(prefix="/api/editorial", tags=["editorial"])
 
 _settings = get_settings()
-_llm = LLMClient()
 
-# Run the (potentially long, multi-call) editorial pipeline off the request thread so
-# the HTTP response returns immediately with a run_id. The frontend polls status instead
-# of blocking for minutes (which previously looked like a hang while tokens kept burning).
-from concurrent.futures import ThreadPoolExecutor
+# Run the (potentially long, multi-call) editorial pipeline in a SEPARATE PROCESS (not a
+# thread). OpenRouter intermittently stalls a connection (accepts the request but never
+# streams a response and never closes). On CPython/macOS a socket stuck in ssl.recv is
+# NOT interruptible by httpx/socket timeouts or a worker-thread future, so it blocks
+# forever and keeps billing. A subprocess is the only reliable kill: SIGKILL cannot be
+# ignored by a blocked recv, so Cancel can `process.kill()` a wedged run instantly. The
+# HTTP response returns immediately with a run_id; the frontend polls status instead of
+# blocking for minutes (which previously looked like a hang while tokens kept burning).
+import multiprocessing
 
-_editorial_executor = ThreadPoolExecutor(max_workers=2)
+# Track live run processes so Cancel can kill a wedged one unblockably.
+_editorial_processes: dict[int, multiprocessing.Process] = {}
 
 
 class EditorialOut(BaseModel):
@@ -84,71 +86,26 @@ def run_editorial(
     effective_user_id = effective_user.id
 
     def _worker():
-        # Own session + retry the DB operations outside the request session.
-        from sqlmodel import Session as _S
-        from backend.db import get_engine, User as _User
-        from backend.editorial import EditorialCanceled
+        # Runs in its OWN PROCESS (see launch below). The subprocess main thread can
+        # receive SIGALRM, so the per-stage hard timeout inside run_editorial_pipeline
+        # actually interrupts a stalled OpenRouter recv (a thread never could). The
+        # editorial_worker module owns the run lifecycle + all error handling.
+        from backend.editorial_worker import run_worker
 
-        try:
-            with _S(get_engine()) as ws:
-                ws_user = ws.get(_User, effective_user_id) or get_or_create_dev_user(ws)
-                try:
-                    run_editorial_pipeline(
-                        ws,
-                        ws_user,
-                        essay,
-                        brand_id,
-                        platforms,
-                        _llm,
-                        mode=mode,
-                        max_ideas=max_ideas,
-                        run_multiplier=run_multiplier,
-                    )
-                except EditorialCanceled:
-                    # The pipeline already marked the run "canceled" and saved partial work.
-                    pass
-                except InsufficientCredits as exc:
-                    r = ws.get(EditorialRun, run_id)
-                    if r:
-                        r.status = "failed"
-                        r.error = f"Insufficient credits: {exc}"
-                        ws.add(r)
-                        ws.commit()
-                except Exception as exc:  # noqa: BLE001
-                    import traceback as _tb
+        run_worker(
+            run_id=run_id,
+            essay=essay,
+            brand_id=brand_id,
+            platforms=platforms,
+            mode=mode,
+            max_ideas=max_ideas,
+            run_multiplier=run_multiplier,
+            user_id=effective_user_id,
+        )
 
-                    r = ws.get(EditorialRun, run_id)
-                    if r:
-                        r.status = "failed"
-                        # Store the FULL traceback (file:line + message) so a hidden
-                        # IndexError/etc. is never reduced to a bare message.
-                        r.error = (str(exc) + "\n" + _tb.format_exc())[:4000]
-                        ws.add(r)
-                        ws.commit()
-        except Exception as exc:  # noqa: BLE001 - ANY worker failure must end the run
-            # If the worker dies for ANY reason (session setup, thread kill, OOM), the
-            # request handler already set the row to "running". Without this catch the run
-            # would be stuck "running" at 0 forever (and un-cancelable). Always mark it
-            # failed with the real cause so the UI never hangs on a dead row.
-            import traceback as _tb
-
-            try:
-                with _S(get_engine()) as ws:
-                    r = ws.get(EditorialRun, run_id)
-                    if r and r.status == "running":
-                        r.status = "failed"
-                        r.error = (
-                            "Worker error (run did not complete): "
-                            + str(exc)[:500]
-                            + "\n"
-                            + _tb.format_exc()[:2000]
-                        )
-                        ws.add(r)
-                        ws.commit()
-            except Exception:
-                pass
-
-    _editorial_executor.submit(_worker)
+    proc = multiprocessing.Process(target=_worker, name=f"editorial-run-{run_id}", daemon=True)
+    proc.start()
+    _editorial_processes[run_id] = proc
 
     return {
         "run_id": run_id,
@@ -267,6 +224,13 @@ def cancel_editorial_run(
     session.add(run)
     session.commit()
     cancel_run(run_id)
+    # If we have the live subprocess handle, SIGKILL it. This unblockably terminates a
+    # run wedged in a stalled OpenRouter recv (the only reliable kill for that case) --
+    # killing the server was previously the only way, which still leaked in-flight calls.
+    proc = _editorial_processes.pop(run_id, None)
+    if proc is not None and proc.is_alive():
+        proc.kill()
+        proc.join(timeout=2)
     return {"run_id": run_id, "status": "canceled"}
 
 

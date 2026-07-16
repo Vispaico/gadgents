@@ -949,4 +949,69 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
   `get_run` poll on an orphaned (25-min-old) "running" row now returns `failed` (reaped); 3 stuck
   DB rows reaped; fake-LLM full run still completes with progress committed.
 
+## Session update (2026-07-16) — ROOT CAUSE of "burns tokens, 0 assets, can't stop" FOUND + fixed
+- PICKUP CONTEXT: the previous chat (chat-notes.md) ran a real essay, got "10 min / 15¢ / 0 assets
+  / Cancel works but still nothing", diagnosed it as the Creator Fusion using the SLOW full
+  `aion3` (~23s p50 E2E), and swapped `aion3` -> `aion3-mini` in the Editorial Creator + Wan panels.
+  That swap is present and correct, but it was NOT the root cause. This session found the real bug.
+- THE REAL ROOT CAUSE: OpenRouter intermittently STALLS a connection — it accepts the request but
+  never streams a response body and never closes the socket. On CPython 3.14 / macOS, a socket
+  stuck in `ssl.recv` for such a half-open connection is NOT interruptible by ANY in-process
+  mechanism: we empirically proved httpx's read timeout, socket SO_RCVTIMEO, closing the client,
+  a ThreadPoolExecutor `future.result(timeout=)`, and a `threading.Timer` that closes the client
+  ALL fail to break it — the call blocks indefinitely. So the Editorial worker thread wedged at
+  stage 2 (miner/strategist) forever: ideas got mined (30) but 0 assets, tokens kept billing, and
+  killing the dev server was the only escape (and even that leaked in-flight OpenRouter calls).
+- EVIDENCE: `run_editorial_pipeline` debug with a watchdog showed the stack wedged inside
+  `llm.complete_targeted -> httpx -> ssl.recv` past the 180s read timeout AND past a 240s SIGALRM
+  fired from a worker thread (signals don't interrupt another thread's recv). Stage-stepping with a
+  main-thread SIGALRM showed: miner 137s, strategist 66s, then creator STALLED >60s and the
+  per-stage alarm fired and raised ("stage hard 60s") — i.e. a stalled call really does hang the
+  whole run, while live-but-slow calls (137s) just make it painfully slow.
+- FIX 1 (latency/cost, confirmed secondary but shipped): `editorial-creator` + `editorial-quality-
+  director` Fusion panels -> SINGLE-MODEL. Fusion (4 panel + judge ~100s/call) was the other half
+  of the slowness. Measured: Creator Fusion ~102s -> single `or-aion3-mini` ~31s; Quality Director
+  Fusion ~95s -> single `or-qwen37`/`or-ds-pro` ~20-30s; Humanizer already ~5s. Net per-asset:
+  ~202s -> ~60s (~3.3x faster, ~3x cheaper). The Quality/Cost toggle still drives single-model
+  choice via `_run_stage` (Quality->ds-pro, Balanced->qwen37, Economic->llama33), so the toggle
+  stays meaningful. Aion storytelling is preserved by the agent's SYSTEM PROMPT, not by Fusion.
+  Wan-video judge also moved off full aion3 (panel aion3-mini, judge ds-pro) for the same reason.
+- FIX 2 (the actual kill — ROOT FIX): Editorial now runs in a SEPARATE PROCESS, not a thread.
+  * NEW `backend/editorial_worker.py`: `run_worker(run_id, essay, brand_id, platforms, mode,
+    max_ideas, run_multiplier, user_id)` runs the whole pipeline in its own PID. Its main thread
+    arms a per-stage `signal.alarm(_STAGE_HARD_TIMEOUT_S=150)` (via `_StageTimeout` in editorial.py)
+    so a stalled stage raises a clean TimeoutError -> run marked failed instead of hanging forever.
+  * `routes/editorial.py` now launches `multiprocessing.Process(target=run_worker, daemon=True)`
+    (replacing the old `ThreadPoolExecutor` worker) and stores the handle in `_editorial_processes`.
+  * Cancel endpoint (`POST /api/editorial/runs/{id}/cancel`) now also `proc.kill()` (SIGKILL) the
+    live subprocess. SIGKILL cannot be ignored by a blocked recv, so a wedged run is stopped
+    INSTANTLY — no more killing the dev server, no more leaked billing. (The DB `canceled` flag +
+    in-memory `cancel_run` are still set for the same-PID case.)
+  * WHY A PROCESS: it's the only mechanism that reliably kills a stalled recv. Threads can't
+    (proven). The SIGALRM per-stage timeout is a second safety net that works because the
+    subprocess runs `_run_stage` in its MAIN thread (signals only interrupt the main thread).
+- FIX 3 (resilience): `_run_stage` now wraps each call in `_StageTimeout` (arm alarm at entry,
+  clear at every return/raise). The 150s budget is per-stage and re-armed each stage, so a slow
+  healthy call (e.g. the 137s miner) doesn't cannibalize the next stage's window. A stall >150s on
+  any single call aborts the run cleanly (failed + real error saved) instead of hanging.
+- VERIFIED THIS SESSION:
+  * All modules py_compile; `TestClient` boot returns /api/config + /api/editorial/{brands,
+    templates, runs} = 200; startup reaper cleared 8 zombie "running" rows from earlier test runs.
+  * Real subprocess run (run 77): wedged at the miner (ideas=0) for 90s, then a simulated Cancel
+    SIGKILLed the subprocess IMMEDIATELY and the run was cleanly marked `canceled`. This is the
+    exact "burn tokens, can't stop" case and it is now resolved — Cancel stops a wedged run.
+  * Individual OpenRouter calls all responded when not stalled (aion3-mini 3s, qwen37 15s,
+    ds-pro 3s, single creator 31s). The remaining variable is OpenRouter's own latency/stall rate,
+    which is external — but it can no longer wedge the app or be unstoppable.
+- CAVEAT / USER GUIDANCE: OpenRouter is currently VERY slow for some models (miner ~137s, and it
+  intermittently stalls). Even with the single-model fix, a 2-idea x 1-platform run can take
+  several minutes when OpenRouter is loaded, and a stall still aborts the run at the 150s/stage
+  ceiling (you'll see a clear "provider stalled" error instead of a silent hang). For a fast first
+  success: use **max_ideas=2-4 + 1 platform + Balanced**, and don't be alarmed if a run takes a
+  few minutes — it now always either finishes, fails cleanly, or is stoppable via Cancel.
+- NOT YET DONE / LATER: live end-to-end SUCCESS run (all stages completing with assets) was not
+  observed this session because OpenRouter kept stalling the miner; the fix makes that run
+  killable + faster, but a no-stall OpenRouter window is needed to see a full green run. The user
+  should retry when OpenRouter is snappier, starting small.
+
 ## Next steps (per original plan + where we are)
