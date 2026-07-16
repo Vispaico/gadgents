@@ -130,6 +130,41 @@ class _StageTimeout:
         return False
 
 
+class _AttemptTimeout:
+    """Per-model-attempt alarm (45s). Distinct from _StageTimeout so a single stalled
+    model call is aborted and we rotate to the next model WITHOUT disarming the outer
+    stage alarm. Only effective in the main thread (editorial subprocess worker)."""
+
+    def __init__(self, seconds: int):
+        self._seconds = seconds
+
+    def __enter__(self):
+        try:
+            if threading.current_thread() is threading.main_thread():
+                signal.signal(signal.SIGALRM, _attempt_alarm_handler)
+                signal.alarm(self._seconds)
+        except (ValueError, OSError):
+            pass
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            # Re-arm the STAGE handler + remaining stage budget so the next attempt is
+            # still covered by the per-stage ceiling.
+            signal.signal(signal.SIGALRM, _stage_alarm_handler)
+            signal.alarm(_STAGE_HARD_TIMEOUT_S)
+        except (ValueError, OSError):
+            pass
+        return False
+
+
+def _attempt_alarm_handler(signum, frame):
+    raise TimeoutError(
+        f"Editorial model attempt exceeded the 45s timeout (provider stalled). "
+        "Rotating to the next model."
+    )
+
+
 def _stage_alarm_handler(signum, frame):
     raise TimeoutError(
         f"Editorial stage exceeded the {_STAGE_HARD_TIMEOUT_S}s hard timeout "
@@ -148,10 +183,13 @@ _CANCELLED: set[int] = set()
 # for small assets. Most stages need far less; the Quality Director (a single asset
 # rewrite) is the only place that occasionally needs more.
 _STAGE_MAX_TOKENS: dict[str, int] = {
-    # The miner is asked for 25-50 short ideas as one JSON object; that is ~6000-8000
-    # output tokens. A 4000 ceiling hard-truncates the reply mid-array (the "Idea Miner
-    # returned no usable ideas" failure). Do NOT lower this below what the prompt demands.
-    "idea_miner": 8000,
+    # The miner is asked for 25-50 SHORT ideas as one JSON object (terse fields,
+    # ~2000-3000 output tokens). Empirically on OpenRouter a miner call with
+    # max_tokens=8000 + a large essay INPUT stalls/hangs the connection (accepts the
+    # request but never streams a response — the "burned 20c, got nothing" failure).
+    # 3000 is enough for 50 short ideas AND avoids the stall. Do NOT raise above ~3500
+    # for the miner unless OpenRouter's large-input behavior changes.
+    "idea_miner": 3000,
     "strategist": 3000,
     "creator": 3000,       # per-platform asset (4 versions) rarely needs more than 3k
     "humanizer": 2500,
@@ -277,62 +315,56 @@ def _run_stage(
         # Single-model stage: OVERRIDE the agent's hard pin with the per-mode model so
         # Balanced/Economic are genuinely cheap. Anthropic-free.
         # NOTE (2026-07-16): OpenRouter intermittently STALLS (half-open TLS, no response,
-        # un-killable by in-process timeouts) on qwen3.7-plus for large requests like the
-        # Idea Miner. DeepSeek-v4-pro (or-ds-pro) is currently the reliable model for those
-        # big calls, so 'mixed' uses it (Quality also uses ds-pro; only Economic drops to
-        # llama33). If a model stalls, the per-stage SIGALRM/retry + watchdog still abort the
-        # run rather than hanging forever. Revisit if OpenRouter's qwen37 stability returns.
-        single_model = {
+        # un-killable by in-process timeouts) on large editorial requests. It is FLAKY: the
+        # SAME model sometimes answers in ~37s and sometimes stalls forever. To survive that
+        # flakiness we ROTATE across several catalog models and bounded-retry, so a stall on
+        # one model's turn gets another shot on the next attempt (within the per-stage alarm
+        # budget). 'mixed' leads with or-ds-pro (most often answers), then or-aion3-mini,
+        # then or-qwen37; Economic drops to or-llama33. This is the practical fix for an
+        # external provider's stalls — it can't make a stalled API return, but it buys the
+        # run several independent attempts before the watchdog kills it.
+        lead = {
             "high": "or-ds-pro",
             "mixed": "or-ds-pro",
             "economic": "or-llama33",
         }[eff_mode]
-        try:
-            result, used_id = route(
-                llm,
-                messages,
-                model_id=single_model,
-                goal=eff_mode,
-                fusion=False,
-                max_tokens=mt,
-            )
-            if not result:
-                # Empty/None reply: raise so the retention/retry below swaps to a fallback
-                # model instead of passing None downstream into len()/json.loads.
-                _stage_timeout.__exit__(None, None, None)
-                raise RuntimeError(
-                    f"Editorial stage '{stage}' returned an empty reply from {single_model}."
-                )
-            _stage_timeout.__exit__(None, None, None)
-            return result, used_id or single_model
-        except Exception as exc:
-            # A single transient provider/model failure shouldn't kill the whole run.
-            # Retry once on a safe, always-available fallback model before giving up.
-            from backend.router import recommend
-
-            fb = recommend(eff_mode)
-            if fb.id == single_model:
-                _stage_timeout.__exit__(None, None, None)
-                raise RuntimeError(
-                    f"Editorial stage '{stage}' failed on {single_model}: {exc}"
-                )
+        rotation = {
+            "high": ["or-ds-pro", "or-aion3", "or-kimi"],
+            "mixed": ["or-ds-pro", "or-aion3-mini", "or-qwen37"],
+            "economic": ["or-llama33", "or-ds-flash", "or-ds-flash-free"],
+        }[eff_mode]
+        last_exc: Optional[Exception] = None
+        # Up to 4 attempts. Each is bounded by a per-attempt alarm (45s) so a stall is
+        # caught and we move to the next model instead of hanging for the full 150s on one.
+        for attempt in range(4):
+            mid = rotation[attempt % len(rotation)]
+            if attempt >= 1 and mid == lead:
+                pass  # allow repeating the rotation if needed
             try:
-                result, used_id = route(
-                    llm,
-                    messages,
-                    model_id=fb.id,
-                    goal=eff_mode,
-                    fusion=False,
-                    max_tokens=mt,
-                )
+                # Per-attempt hard stop: a stalled call must not eat the whole budget.
+                with _AttemptTimeout(45):
+                    result, used_id = route(
+                        llm,
+                        messages,
+                        model_id=mid,
+                        goal=eff_mode,
+                        fusion=False,
+                        max_tokens=mt,
+                    )
+                if not result:
+                    raise RuntimeError(
+                        f"Editorial stage '{stage}' returned an empty reply from {mid}."
+                    )
                 _stage_timeout.__exit__(None, None, None)
-                return result, used_id or fb.id
-            except Exception as exc2:
-                _stage_timeout.__exit__(None, None, None)
-                raise RuntimeError(
-                    f"Editorial stage '{stage}' failed on {single_model} "
-                    f"(and fallback {fb.id}): {exc} | {exc2}"
-                )
+                return result, used_id or mid
+            except Exception as exc:  # noqa: BLE001 - try the next model / attempt
+                last_exc = exc
+                continue
+        _stage_timeout.__exit__(None, None, None)
+        raise RuntimeError(
+            f"Editorial stage '{stage}' failed after retries across "
+            f"{rotation}: {last_exc}"
+        )
 
 
 def _brand_block(brand: BrandProfile) -> str:

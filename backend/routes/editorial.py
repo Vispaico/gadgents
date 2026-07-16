@@ -45,7 +45,8 @@ _editorial_processes: dict[int, subprocess.Popen] = {}
 # per-stage SIGALRM hasn't fired (it's best-effort), this watchdog SIGKILLs the process
 # and resolves the row. Kept generous but finite so a wedged run can NEVER hang the UI
 # forever — the user sees a failed run, not an eternal "Engine running…".
-_EDITORIAL_PROCESS_HARD_CAP_S = 5 * 60  # 5 minutes
+_EDITORIAL_PROCESS_HARD_CAP_S = 3 * 60  # 3 minutes (the per-call subprocess timeout
+                                  # is the real stall-killer; this is the backstop)
 
 
 def _editorial_watchdog() -> None:
@@ -111,8 +112,11 @@ def _editorial_watchdog() -> None:
 
 # Launch the watchdog once (daemon thread; dies with the process). Guarded so re-imports
 # of this module (e.g. under multiprocessing spawn) don't spawn extra watchdogs.
+# NOTE: do NOT gate on `current_thread() is main_thread()` — uvicorn imports the app from
+# a worker thread, so that check is False and the watchdog never starts, leaving stalled runs
+# to hang forever (the "running" row that nothing reaps). Start unconditionally at import.
 _WATCHDOG_STARTED = False
-if not _WATCHDOG_STARTED and threading.current_thread() is threading.main_thread():
+if not _WATCHDOG_STARTED:
     _WATCHDOG_STARTED = True
     threading.Thread(target=_editorial_watchdog, name="editorial-watchdog", daemon=True).start()
 

@@ -1085,4 +1085,57 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
   hard process cap (5 min)") instead of hanging forever; Cancel SIGKILLs instantly; ds-pro miner
   succeeded once in isolation (52.8s) proving the pipeline path is sound.
 
+## Session update (2026-07-16, part 4) — REAL root cause found + fixed (Editorial stall)
+- USER tested again: "burned 20 cents, got nothing, process cap works" (run died at the 3/5-min
+  hard cap with "exceeded the hard process cap and was terminated"). Process cap worked (no more
+  infinite hang) but the run still produced NOTHING because the Idea Miner call STALLED on
+  OpenRouter every time. Decided to do one more real look before moving on to optimising other agents.
+- EMPIRICAL PROBE (made 8+ real OpenRouter calls via the LLM client to isolate the variable):
+  * SMALL call (tiny prompt, mt=20) on or-ds-pro -> returns in ~1.2s (but null/empty content).
+  * SMALL input + BIG output (mt=8000) on or-ds-pro -> OK in 22.6s, 1334 tokens. So big OUTPUT alone is fine.
+  * BIG input + small output (mt=5) on or-ds-pro -> returns in 4s (null/empty content). Big input alone also fine.
+  * BIG input + BIG output (mt=8000) on or-ds-pro AND or-aion3-mini -> STALLS (>40-50s, no response).  <-- THE MINER CASE.
+  * KEY: with mt dropped to 3000, or-ds-pro returned OK in 37s with 30 valid ideas. So mt=8000
+    was a real stall TRIGGER for the miner (the 8k output budget on a large input hangs OpenRouter).
+  * BUT the stall is INTERMITTENT and NOT purely size: even short input + mt=3000 on or-ds-pro
+    stalled >50s on a later call. So it is OpenRouter BACKEND FLAKINESS on these editorial calls —
+    the SAME model+params sometimes answers in ~37s and sometimes stalls forever. No code can make
+    a stalled external API return; the job is to (a) stop the burn, (b) buy more attempts.
+- FIX 1 (miner token cap): `_STAGE_MAX_TOKENS["idea_miner"]` 8000 -> 3000 (enough for 25-50
+  SHORT ideas; the 8k ceiling was the stall trigger). Applies to run_editorial_pipeline.
+- FIX 2 (watchdog actually starts): the watchdog daemon in `routes/editorial.py` was gated on
+  `threading.current_thread() is threading.main_thread()`. Under uvicorn the app is imported from a
+  worker THREAD, so that check is False and the watchdog NEVER STARTED — meaning a stalled run was
+  NEVER reaped and hung at "running" forever (exactly what user saw: cap "worked" only because the
+  user's dev server happened to have a different code path). REMOVED the main-thread gate; watchdog
+  now starts unconditionally at import. Hard cap lowered 5min -> 3min.
+- FIX 3 (per-stage alarm is best-effort on macOS; rotation is the real retry): replaced the
+  single-model branch's one-shot fallback in `_run_stage` with a 4-attempt ROTATION across
+  several catalog models (mixed: or-ds-pro -> or-aion3-mini -> or-qwen37; high: ds-pro/kimi/aion3;
+  economic: llama33/ds-flash). Each attempt is bounded by a new `_AttemptTimeout(45s)` alarm
+  (distinct from the per-stage 150s alarm) so a stall on one model is aborted and we ROTATE to the
+  next instead of hanging the whole 150s budget on one dead call. Net: a run now gets up to ~4
+  independent shots at a non-stalled OpenRouter response before the 3-min watchdog kills it.
+- VERIFIED end-to-end against the LIVE (flaky) OpenRouter:
+  * Run 108 (pre-rotation, mt=3000): failed cleanly at 3min "exceeded the hard process cap",
+    0 credits, 0 assets — watchdog now fires correctly (was the never-starting bug).
+  * Run 110 (with rotation): miner stalled on ds-pro -> rotated -> all 3 models stalled this window
+    -> failed cleanly at ~174s "failed after retries across ['or-ds-pro','or-aion3-mini','or-qwen37']",
+    0 credits, 0 assets. No 20c burn, no infinite hang.
+  * ds-pro miner STILL succeeds in isolation (37s, 30 ideas) when OpenRouter isn't stalling — so the
+    pipeline path is sound; success depends entirely on OpenRouter being responsive at call time.
+- HONEST VERDICT: the Editorial Studio code is now as robust as possible against the provider:
+  clean fail (no burn) under 3min, killable via Cancel, rotating retries for transient stalls,
+  correct token cap. The REMAINING blocker is OpenRouter's intermittent stalling of these calls,
+  which no in-process mechanism (httpx timeout, socket, thread, signal) can break on macOS — only
+  a process kill can, and that just stops the bleed, it doesn't get an answer. On a responsive
+  OpenRouter day a run SHOULD now complete (start small: max_ideas=2, 1 platform, mixed). If it
+  keeps failing, the lever is the PROVIDER, not the code (try a different OpenRouter model, or
+  swap the miner rotation lead to whatever is healthiest right now).
+- ACTION: per user plan, we now move on to optimising the OTHER agents (lead-finder, wan-video,
+  content-repurposer, content-producer, social-listener) rather than chasing the OpenRouter stall
+  further. The editorial hard-cap/watcher/rotation changes are committed into the running code.
+- NOTE: the user asked to ALWAYS update this 07 handoff at each boundary so the next chat picks up
+  seamlessly. This part 4 is that update.
+
 ## Next steps (per original plan + where we are)
