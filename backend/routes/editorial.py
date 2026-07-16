@@ -2,6 +2,8 @@ from fastapi import APIRouter, Body, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
+import time
+
 from backend.auth import get_current_user
 from backend.config import get_settings
 from backend.db import (
@@ -32,9 +34,86 @@ _settings = get_settings()
 # HTTP response returns immediately with a run_id; the frontend polls status instead of
 # blocking for minutes (which previously looked like a hang while tokens kept burning).
 import multiprocessing
+import threading
 
 # Track live run processes so Cancel can kill a wedged one unblockably.
 _editorial_processes: dict[int, multiprocessing.Process] = {}
+
+# Hard ceiling (seconds) a SINGLE editorial subprocess may live, even if it never hits a
+# stall we can detect. OpenRouter stalls are invisible to in-process timeouts, so if the
+# per-stage SIGALRM hasn't fired (it's best-effort), this watchdog SIGKILLs the process
+# and resolves the row. Kept generous but finite so a wedged run can NEVER hang the UI
+# forever — the user sees a failed run, not an eternal "Engine running…".
+_EDITORIAL_PROCESS_HARD_CAP_S = 12 * 60  # 12 minutes
+
+
+def _editorial_watchdog() -> None:
+    """Background thread in the uvicorn process: the reliable safety net for stalled
+    editorial runs. For every tracked run it (a) reaps the row if the child died but left
+    it 'running', and (b) SIGKILLs a child that outlived the hard cap. SIGKILL cannot be
+    ignored by a blocked recv, so this always works even when the subprocess's own
+    SIGALRM timeout doesn't fire."""
+    from sqlmodel import Session as _S
+    from backend.db import get_engine, EditorialRun as _ER
+
+    while True:
+        try:
+            time.sleep(15)
+            dead: list[int] = []
+            for rid, proc in list(_editorial_processes.items()):
+                try:
+                    if not proc.is_alive():
+                        # Child ended (crashed, killed, or finished). If the row is still
+                        # 'running' it was left orphaned — resolve it as failed so the UI
+                        # never shows a permanent spinner. (A clean finish writes 'done'
+                        # before exit; a Cancel already wrote 'canceled'.)
+                        with _S(get_engine()) as ws:
+                            r = ws.get(_ER, rid)
+                            if r is not None and r.status == "running":
+                                r.status = "failed"
+                                r.error = (
+                                    "Editorial worker process ended without updating the "
+                                    "run (crash or kill). Partial assets, if any, are kept."
+                                )
+                                ws.add(r)
+                                ws.commit()
+                        dead.append(rid)
+                    elif getattr(proc, "_start_time", 0) and (
+                        time.time() - proc._start_time > _EDITORIAL_PROCESS_HARD_CAP_S
+                    ):
+                        # Over the hard cap and still alive: almost certainly stalled. Kill.
+                        try:
+                            proc.kill()
+                            proc.join(timeout=3)
+                        except Exception:
+                            pass
+                        with _S(get_engine()) as ws:
+                            r = ws.get(_ER, rid)
+                            if r is not None and r.status == "running":
+                                r.status = "failed"
+                                r.error = (
+                                    "Editorial run exceeded the hard process cap "
+                                    f"({_EDITORIAL_PROCESS_HARD_CAP_S // 60} min) and was "
+                                    "terminated to stop token burn."
+                                )
+                                ws.add(r)
+                                ws.commit()
+                        dead.append(rid)
+                except Exception:
+                    # Never let the watchdog itself die; keep protecting other runs.
+                    continue
+            for rid in dead:
+                _editorial_processes.pop(rid, None)
+        except Exception:
+            continue
+
+
+# Launch the watchdog once (daemon thread; dies with the process). Guarded so re-imports
+# of this module (e.g. under multiprocessing spawn) don't spawn extra watchdogs.
+_WATCHDOG_STARTED = False
+if not _WATCHDOG_STARTED and threading.current_thread() is threading.main_thread():
+    _WATCHDOG_STARTED = True
+    threading.Thread(target=_editorial_watchdog, name="editorial-watchdog", daemon=True).start()
 
 
 class EditorialOut(BaseModel):
@@ -85,26 +164,31 @@ def run_editorial(
     # processing). The worker re-loads the user by id in its own session instead.
     effective_user_id = effective_user.id
 
-    def _worker():
-        # Runs in its OWN PROCESS (see launch below). The subprocess main thread can
-        # receive SIGALRM, so the per-stage hard timeout inside run_editorial_pipeline
-        # actually interrupts a stalled OpenRouter recv (a thread never could). The
-        # editorial_worker module owns the run lifecycle + all error handling.
-        from backend.editorial_worker import run_worker
+    # Run in a SEPARATE PROCESS (not a thread). The subprocess main thread can receive
+    # SIGALRM, so the per-stage hard timeout inside run_editorial_pipeline actually
+    # interrupts a stalled OpenRouter recv (a thread never could), and Cancel can
+    # SIGKILL the process to stop a wedged run unblockably. The target MUST be a
+    # module-level function (not a local closure) so multiprocessing can pickle it for
+    # the spawn/fork handoff; all args are plain ints/strs/lists and are picklable.
+    from backend.editorial_worker import run_worker
 
-        run_worker(
-            run_id=run_id,
-            essay=essay,
-            brand_id=brand_id,
-            platforms=platforms,
-            mode=mode,
-            max_ideas=max_ideas,
-            run_multiplier=run_multiplier,
-            user_id=effective_user_id,
-        )
-
-    proc = multiprocessing.Process(target=_worker, name=f"editorial-run-{run_id}", daemon=True)
+    proc = multiprocessing.Process(
+        target=run_worker,
+        name=f"editorial-run-{run_id}",
+        daemon=True,
+        args=(
+            run_id,
+            essay,
+            brand_id,
+            platforms,
+            mode,
+            max_ideas,
+            run_multiplier,
+            effective_user_id,
+        ),
+    )
     proc.start()
+    proc._start_time = time.time()
     _editorial_processes[run_id] = proc
 
     return {

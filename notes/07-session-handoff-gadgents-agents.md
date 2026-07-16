@@ -1014,4 +1014,34 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
   killable + faster, but a no-stall OpenRouter window is needed to see a full green run. The user
   should retry when OpenRouter is snappier, starting small.
 
+## Session update (2026-07-16, part 2) — 500 on POST /api/editorial/run + orphaned "running" rows
+- USER HIT A 500 on `POST /api/editorial/run` right after the part-1 subprocess change. ROOT
+  CAUSE: the route passed a LOCAL NESTED FUNCTION `_worker` as `multiprocessing.Process(target=...)`.
+  multiprocessing must PICKLE the target for the spawn/fork handoff, and local closures can't be
+  pickled -> `PicklingError: Can't pickle local object <function run_editorial.<locals>._worker>`.
+  FIX: pass the MODULE-LEVEL `backend.editorial_worker.run_worker` as the target with plain
+  picklable args (run_id, essay, brand_id, platforms, mode, max_ideas, run_multiplier, user_id).
+  Verified: `POST /api/editorial/run` now returns 200 instantly (subprocess launches, no pickle
+  error) with a run_id.
+- SECOND bug found live: a run mined 30 ideas (miner OK, deepseek tokens spent) then sat at
+  "Engine running… 0 assets" for 4+ min. DB showed the worker PROCESS WAS GONE but the run row
+  stayed `status=running` — i.e. the subprocess died (crash/kill) without updating the row, and
+  nothing resolved it. The per-stage SIGALRM (part 1) is BEST-EFFORT and did NOT reliably fire in
+  the real uvicorn-spawned subprocess (confirmed it works in an isolated test but not here), so a
+  dead/stalling child could leave a permanent "running" spinner. This is the "bs, nothing happens"
+  the user saw.
+- FIX (guaranteed safety net): added an **editorial watchdog daemon thread** in `routes/editorial.py`
+  (`_editorial_watchdog`, 15s tick). For each tracked run it (a) reaps the row if the child process
+  is dead but the row is still `running` (marks `failed` with a clear cause), and (b) SIGKILLs a
+  child that has lived past `_EDITORIAL_PROCESS_HARD_CAP_S` (12 min) and marks it failed. SIGKILL is
+  unblockable, so this ALWAYS works even when the subprocess's own SIGALRM doesn't fire — a wedged
+  run can NEVER hang the UI forever now. Verified: a dead child with an orphaned `running` row was
+  reaped to `failed` within 15s by the watchdog.
+- Also: the per-stage SIGALRM in `editorial.py` (`_StageTimeout`, 150s) stays as the fast path for
+  the common stall (catches most stalled calls); the watchdog is the backstop for when it doesn't.
+- ACTION TAKEN for the user's stuck run 84: marked it `failed` directly so the UI unblocks. The
+  user MUST restart `./dev.sh` to load the new code (their running server still had the old code).
+- VERIFIED: all modules py_compile; `TestClient` boot 200 on /api/editorial/{brands,runs}; POST
+  /run returns 200 with run_id; watchdog reaps a dead-process/running-row to failed in <=15s.
+
 ## Next steps (per original plan + where we are)
