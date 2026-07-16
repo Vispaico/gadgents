@@ -863,4 +863,38 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
   aion-labs/aion-3.0-mini resolve from `.env`; editorial-creator/quality-director/content-repurposer/
   wan-video panels print out Anthropic-free. No frontend change.
 
+## Session update (2026-07-16, part 20) — REAL Editorial killer: gateway-wide cooldown + a None regression
+- User tested after part 19: models routed fine (DeepSeek V4 Pro, Aion-3.0, Kimi K2.6; only 6¢),
+  but STILL died with `Run failed: Fusion panel: all models failed and fallback errored: Provider
+  unhealthy (cooldown): openrouter`. So it was NEVER the model — the whole `openrouter` PROVIDER
+  was in cooldown, so every call (incl. the fallback) failed and the run died after spending money.
+- ROOT CAUSE 1 (the gateway cooldown): `backend/llm.py` tracked health PER PROVIDER. OpenRouter is
+  ONE HTTP endpoint hosting MANY models (DeepSeek, Kimi, Aion, Qwen...). `_mark_failure` put the
+  entire `openrouter` provider into a 30s cooldown after just 2 failures. In a Fusion panel, if one
+  panel member hiccuped (throttle / rate-limit / null completion), 2 such failures cooled down the
+  WHOLE gateway — so every later call in the run (every asset, every stage, AND the fallback) failed
+  with "Provider unhealthy (cooldown)". One flaky model = entire run dead. Classic shared-state bug.
+- FIX 1: health is now tracked PER (provider, model) — `_health` keyed by `(provider, model)`. A
+  single throttled model gets its own short 20s cooldown (after 2 consecutive failures) but does
+  NOT touch sibling models on the same provider. The panel loop already `continue`s on a failed
+  member, so a flaky Kimi is simply skipped while Aion/DeepSeek/Qwen still answer. Verified: a mock
+  where Kimi returns 500 — the fusion skips Kimi and returns the DeepSeek-judged answer; no gateway
+  kill. Also fixed the success path to CLEAR the (provider, model) cooldown counter on success.
+- ROOT CAUSE 2 (a `None` regression from part 18): earlier I wrapped the judge call in a
+  try/except to add fallback, but my edit DELETED the original `return result.text,
+  f"fusion:{judge_entry.id}"` line that ran on judge SUCCESS. So when the judge succeeded,
+  `_run_fusion` fell off the end and returned `None`. `_run_stage` then raised "Editorial stage
+  returned an empty reply" (or downstream `len(None)`), making EVERY run fail even though the model
+  answered correctly. This was masking the cooldown fix and was itself a fatal bug.
+- FIX 2: restored the success `return result.text, f"fusion:{judge_entry.id}"` INSIDE the try (the
+  except now only handles the judge-failure fallback path). Verified: fusion now returns the judge
+  text on success (no None) AND falls back to the panel answer on judge failure.
+- BEHAVIOR NOW: a single flaky model on OpenRouter no longer kills the run; the judge succeeding
+  returns real content; a failing judge still falls back to the best panel answer. Editorial should
+  finally complete end-to-end. (Note: the per-model cooldown is 20s — a model that stays hard-broken
+  is skipped transiently, then retried; the Fusion panel/judge fallbacks cover transient bumps.)
+- VERIFIED: `backend/llm.py` + `backend/router.py` py_compile OK; test confirms (a) Kimi-500 is
+  isolated and the run returns DeepSeek-judged content, and (b) judge success returns text (not
+  None). All imports OK.
+
 ## Next steps (per original plan + where we are)

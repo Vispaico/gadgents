@@ -255,6 +255,7 @@ def _run_fusion(
             judge_entry.provider, judge_entry.model, judge_messages,
             temperature=temperature, max_tokens=max_tokens,
         )
+        return result.text, f"fusion:{judge_entry.id}"
     except Exception:
         # The panel answers are already good; don't kill the whole run (and waste the
         # credits already spent) just because the judge model hiccupped (e.g. a null/

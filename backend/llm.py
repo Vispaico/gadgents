@@ -22,6 +22,14 @@ class _ProviderHealth:
     cooldown_until: float = 0.0
 
 
+# Health is tracked PER (provider, model), NOT per provider. OpenRouter is a single HTTP
+# endpoint that hosts many different models (DeepSeek, Kimi, Aion, Qwen, ...). A single
+# model being throttled / rate-limited must NOT cool down the whole OpenRouter gateway and
+# take down every other model on it — that previously killed entire Editorial runs the
+# moment one panel member hiccupped ("Provider unhealthy (cooldown): openrouter").
+_HealthKey = tuple[str, str]
+
+
 @dataclass
 class CompletionResult:
     text: str
@@ -53,9 +61,7 @@ class LLMClient:
         self._order: list[ProviderName] = [
             p.strip() for p in self._settings.llm_provider_order.split(",") if p.strip()
         ]
-        self._health: dict[ProviderName, _ProviderHealth] = {
-            p: _ProviderHealth() for p in self._order
-        }
+        self._health: dict[_HealthKey, _ProviderHealth] = {}
         # Generous timeout: Fusion judge calls + long/slow model outputs (esp. on
         # OpenRouter free/economic tiers) routinely exceed the default 60s, which
         # caused run failures ("run failed") on perfectly good requests. Read=180s
@@ -76,17 +82,24 @@ class LLMClient:
             return url or None
         return BASE_URLS.get(provider)
 
-    def _is_healthy(self, provider: ProviderName) -> bool:
-        h = self._health[provider]
+    def _is_healthy(self, provider: ProviderName, model: str = "") -> bool:
+        h = self._health.get((provider, model))
+        if h is None:
+            return True
         if h.cooldown_until and time.time() < h.cooldown_until:
             return False
         return True
 
-    def _mark_failure(self, provider: ProviderName) -> None:
-        h = self._health[provider]
+    def _mark_failure(self, provider: ProviderName, model: str = "") -> None:
+        key = (provider, model)
+        h = self._health.get(key) or _ProviderHealth()
         h.failures += 1
+        # Only cool down THIS model (not the whole provider/gateway). A model needs 2
+        # consecutive failures before a short 20s cooldown so a hard-throttled model is
+        # skipped transiently without killing sibling models on the same provider.
         if h.failures >= 2:
-            h.cooldown_until = time.time() + 30  # 30s cooldown
+            h.cooldown_until = time.time() + 20  # 20s cooldown (per model)
+        self._health[key] = h
 
     def complete(
         self,
@@ -97,7 +110,7 @@ class LLMClient:
     ) -> CompletionResult:
         last_error: Optional[Exception] = None
         for provider in self._order:
-            if not self._is_healthy(provider):
+            if not self._is_healthy(provider, model or ""):
                 continue
             base_url = self._base_url(provider)
             api_key = self._api_key(provider)
@@ -136,7 +149,8 @@ class LLMClient:
                         f"{provider}/{resolved_model} returned an empty (null) completion."
                     )
                 usage = data.get("usage", {})
-                self._health[provider].failures = 0
+                # Success on this (provider, model): clear its cooldown counter.
+                self._health[(provider, resolved_model)] = _ProviderHealth()
                 return CompletionResult(
                     text=choice,
                     provider=provider,
@@ -146,7 +160,7 @@ class LLMClient:
                 )
             except Exception as exc:  # noqa: BLE001 - any failure triggers fallback
                 last_error = exc
-                self._mark_failure(provider)
+                self._mark_failure(provider, resolved_model)
         raise RuntimeError(f"All LLM providers failed. Last error: {last_error}")
 
     def close(self) -> None:
@@ -163,8 +177,8 @@ class LLMClient:
         """Complete on one specific provider + model (used by the fusion router)."""
         if provider not in self._order:
             raise RuntimeError(f"Provider not configured: {provider}")
-        if not self._is_healthy(provider):
-            raise RuntimeError(f"Provider unhealthy (cooldown): {provider}")
+        if not self._is_healthy(provider, model):
+            raise RuntimeError(f"Model {provider}/{model} is in cooldown (recent failures).")
         base_url = self._base_url(provider)
         api_key = self._api_key(provider)
         if base_url is None or (provider != "ollama" and not api_key):
@@ -201,7 +215,8 @@ class LLMClient:
                     f"{provider}/{model} returned an empty (null) completion."
                 )
             usage = data.get("usage", {})
-            self._health[provider].failures = 0
+            # Success on this (provider, model): clear its cooldown counter.
+            self._health[(provider, model)] = _ProviderHealth()
             return CompletionResult(
                 text=choice,
                 provider=provider,
@@ -210,7 +225,7 @@ class LLMClient:
                 tokens_out=usage.get("completion_tokens", 0),
             )
         except Exception as exc:  # noqa: BLE001
-            self._mark_failure(provider)
+            self._mark_failure(provider, model)
             if isinstance(exc, RuntimeError) and "no completions" in str(exc):
                 raise  # already a clear message
             raise RuntimeError(f"{provider}/{model} failed: {exc}") from exc
