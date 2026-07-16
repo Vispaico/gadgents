@@ -897,4 +897,56 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
   isolated and the run returns DeepSeek-judged content, and (b) judge success returns text (not
   None). All imports OK.
 
+## Session update (2026-07-16, part 21) — "res is not defined" + runs stuck at 0 forever (FIXED)
+- User ran Editorial again: models routed fine (8¢), but the UI showed everything at 0, the run
+  "kept running but did nothing," and pressing **Cancel run** errored with `res is not defined`.
+  They stopped the dev server. Confirmed no stray servers (ports 8000/5173/5174 free; only
+  Dropbox/Hermes python procs, unrelated). There were 3 orphaned `running` rows (54/55/58) in the
+  DB from the session — these are exactly the runs that appeared "stuck at 0."
+- BUG A (Cancel crash): in `frontend/src/App.jsx` `EditorialStudio.run()`, the cancel closure
+  `cancelCurrentRef.current` referenced `res.run_id`, but `res` is declared with `const res =
+  await api.editorialRun(...)` INSIDE the `try` block — AFTER the closure was assigned. So when
+  Cancel fired, `res` was not in scope -> `ReferenceError: res is not defined`. Because Cancel
+  never worked, a slow/stuck run could not be stopped, so it appeared to "keep running."
+  FIX: capture `let currentRunId = null;` in the outer `run()` scope; set it to `res.run_id` right
+  after the run starts; the cancel closure uses `currentRunId` (and no-ops if still null). Frontend
+  `npm run build` passes.
+- BUG B (runs stuck "running" at 0 forever): the request handler sets the DB row to `status=
+  "running"` immediately, then the heavy work runs on a `ThreadPoolExecutor` worker. The worker's
+  outer code (e.g. the `ws_user = ws.get(...)` session-setup line) sat OUTSIDE the inner
+  `try/except`, so if the worker thread died for any reason (thread kill, OOM, unexpected error),
+  the exception was swallowed by the executor and the row stayed `status="running", ideas=0,
+  assets=0` forever. Worse, the part-15 poll reaper EXPLICITLY EXCLUDED the current `run_id`, so
+  the polled (orphaned) run was never reaped — it hung at 0 with no way to cancel it.
+  FIXES:
+  * `backend/routes/editorial.py _worker`: wrapped the ENTIRE worker body (session setup +
+    pipeline + all stage handlers) in a top-level `try/except` that, on ANY failure, re-opens a
+    session and marks the run `failed` with the real traceback (file:line) — but ONLY if it is
+    still `running` (so a healthy/canceled/done run is never overwritten). A worker can no longer
+    leave a row stuck "running".
+  * `get_run` reaper now ALSO reaps the CURRENTLY-polled run if `started_at` is older than
+    `RUN_TIMEOUT_SECONDS` (20 min) and not canceled. A live, healthy run auto-cancels via its own
+    guardrail before then, so anything still "running" past the deadline has a dead worker and is
+    resolved as failed on the next poll. This closes the orphan gap that part-15 left open.
+  * The DB already had 3 orphaned rows; ran `reap_interrupted_runs` (the startup reaper) to clear
+    them immediately (also happens automatically on next `./dev.sh` boot, and on next poll).
+- BUG C (UI looked stuck at 0): the running header only showed `result.assets?.length` ("N assets
+  so far"), which stays 0 until the FIRST asset completes (after miner + creator + humanizer +
+  quality for idea #1). So a run that HAD mined ideas looked frozen at 0. FIX: the running header
+  now shows `mined {ideas_count} ideas · {assets} assets so far · ~{credits_used} credits spent`,
+  so partial progress is always visible.
+- WHY IT FELT DEAD: the pipeline was verified correct (fake-LLM run -> status done, ideas 3,
+  assets 3, credits 119; progress commits are visible to the poll). The "0 forever" was the
+  combination of (a) a genuinely slow real run where the assets counter lags, (b) the orphaned-row
+  case that the (excluded) reaper never recovered, and (c) Cancel being broken so it couldn't be
+  stopped. All three are now fixed.
+- BEHAVIOR NOW: Cancel works and stops a run (marks canceled, keeps partial assets). A run that
+  has been polled can never hang at "running" past 20 min — it auto-resolves to failed on poll. A
+  worker that dies for any reason marks the row failed with the real cause. The running UI shows
+  live ideas/assets/credit progress. Start Editorial with max_ideas=4 + 1-2 platforms for a fast
+  first success.
+- VERIFIED: backend `routes/editorial.py` py_compile OK; frontend `npm run build` OK (174 kB);
+  `get_run` poll on an orphaned (25-min-old) "running" row now returns `failed` (reaped); 3 stuck
+  DB rows reaped; fake-LLM full run still completes with progress committed.
+
 ## Next steps (per original plan + where we are)

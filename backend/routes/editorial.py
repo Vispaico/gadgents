@@ -89,41 +89,64 @@ def run_editorial(
         from backend.db import get_engine, User as _User
         from backend.editorial import EditorialCanceled
 
-        with _S(get_engine()) as ws:
-            ws_user = ws.get(_User, effective_user_id) or get_or_create_dev_user(ws)
-            try:
-                run_editorial_pipeline(
-                    ws,
-                    ws_user,
-                    essay,
-                    brand_id,
-                    platforms,
-                    _llm,
-                    mode=mode,
-                    max_ideas=max_ideas,
-                    run_multiplier=run_multiplier,
-                )
-            except EditorialCanceled:
-                # The pipeline already marked the run "canceled" and saved partial work.
-                pass
-            except InsufficientCredits as exc:
-                r = ws.get(EditorialRun, run_id)
-                if r:
-                    r.status = "failed"
-                    r.error = f"Insufficient credits: {exc}"
-                    ws.add(r)
-                    ws.commit()
-            except Exception as exc:  # noqa: BLE001
-                import traceback as _tb
+        try:
+            with _S(get_engine()) as ws:
+                ws_user = ws.get(_User, effective_user_id) or get_or_create_dev_user(ws)
+                try:
+                    run_editorial_pipeline(
+                        ws,
+                        ws_user,
+                        essay,
+                        brand_id,
+                        platforms,
+                        _llm,
+                        mode=mode,
+                        max_ideas=max_ideas,
+                        run_multiplier=run_multiplier,
+                    )
+                except EditorialCanceled:
+                    # The pipeline already marked the run "canceled" and saved partial work.
+                    pass
+                except InsufficientCredits as exc:
+                    r = ws.get(EditorialRun, run_id)
+                    if r:
+                        r.status = "failed"
+                        r.error = f"Insufficient credits: {exc}"
+                        ws.add(r)
+                        ws.commit()
+                except Exception as exc:  # noqa: BLE001
+                    import traceback as _tb
 
-                r = ws.get(EditorialRun, run_id)
-                if r:
-                    r.status = "failed"
-                    # Store the FULL traceback (file:line + message) so a hidden
-                    # IndexError/etc. is never reduced to a bare message.
-                    r.error = (str(exc) + "\n" + _tb.format_exc())[:4000]
-                    ws.add(r)
-                    ws.commit()
+                    r = ws.get(EditorialRun, run_id)
+                    if r:
+                        r.status = "failed"
+                        # Store the FULL traceback (file:line + message) so a hidden
+                        # IndexError/etc. is never reduced to a bare message.
+                        r.error = (str(exc) + "\n" + _tb.format_exc())[:4000]
+                        ws.add(r)
+                        ws.commit()
+        except Exception as exc:  # noqa: BLE001 - ANY worker failure must end the run
+            # If the worker dies for ANY reason (session setup, thread kill, OOM), the
+            # request handler already set the row to "running". Without this catch the run
+            # would be stuck "running" at 0 forever (and un-cancelable). Always mark it
+            # failed with the real cause so the UI never hangs on a dead row.
+            import traceback as _tb
+
+            try:
+                with _S(get_engine()) as ws:
+                    r = ws.get(EditorialRun, run_id)
+                    if r and r.status == "running":
+                        r.status = "failed"
+                        r.error = (
+                            "Worker error (run did not complete): "
+                            + str(exc)[:500]
+                            + "\n"
+                            + _tb.format_exc()[:2000]
+                        )
+                        ws.add(r)
+                        ws.commit()
+            except Exception:
+                pass
 
     _editorial_executor.submit(_worker)
 
@@ -157,11 +180,16 @@ def get_run(
     from datetime import datetime, timezone as _tz
 
     now = datetime.now(_tz.utc)
+    # Reap stuck "running" rows: OTHER runs (older than the 20-min guardrail), and the
+    # CURRENTLY-polled run too IF it has blown well past the wall-clock deadline. A live,
+    # healthy run is auto-canceled by its own guardrail before then, so anything still
+    # "running" past RUN_TIMEOUT_SECONDS has a dead worker and must be resolved — otherwise
+    # it sits at 0 forever and can't be canceled (the bug we hit). The run being actively
+    # polled is intentionally included here for that reason.
     stale = session.exec(
         select(EditorialRun).where(
             EditorialRun.user_id == user.id,
             EditorialRun.status == "running",
-            EditorialRun.id != run_id,
         )
     ).all()
     for r in stale:
@@ -169,7 +197,10 @@ def get_run(
         age = (now - started).total_seconds() if started else 0
         if age > RUN_TIMEOUT_SECONDS and not r.canceled:
             r.status = "failed"
-            r.error = "Run was interrupted (server restarted or worker died). Partial assets, if any, are kept."
+            r.error = (
+                "Run exceeded the time guard and was marked failed (server restarted or "
+                "worker died). Partial assets, if any, are kept."
+            )
             session.add(r)
     session.commit()
     run = session.get(EditorialRun, run_id)

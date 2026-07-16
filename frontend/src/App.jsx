@@ -606,12 +606,17 @@ function EditorialStudio({ user, setError, onRepurpose }) {
     setCanceledRunId(null);
     // Each run gets a nonce; if the user starts another run, the old poll loop stops.
     const myNonce = ++runNonceRef.current;
+    // Capture the run id in component scope so the cancel closure can use it even though
+    // `res` is only assigned inside the try block below (referencing `res.run_id` from the
+    // closure earlier caused "res is not defined" when Cancel was clicked).
+    let currentRunId = null;
     // The user can cancel a run in-flight without killing the dev server (which would
     // otherwise leave OpenRouter calls billing in the background).
     cancelCurrentRef.current = async () => {
+      if (currentRunId == null) return;
       try {
-        await api.editorialCancel(res.run_id);
-        setCanceledRunId(res.run_id);
+        await api.editorialCancel(currentRunId);
+        setCanceledRunId(currentRunId);
       } catch (e) {
         setErr(e.message);
       }
@@ -620,6 +625,7 @@ function EditorialStudio({ user, setError, onRepurpose }) {
       const res = await api.editorialRun(
         essay, brandId, platforms, getMode() || null, maxIdeas, runMultiplier
       );
+      currentRunId = res.run_id;
       // The pipeline runs in the background; poll until it finishes. This keeps the UI
       // responsive and prevents a "hang with no output" while many model calls run.
       let status = res;
@@ -809,7 +815,11 @@ function EditorialStudio({ user, setError, onRepurpose }) {
       {result && (
         <div className="result">
           {result.status === "running" ? (
-            <h3>Engine running… {(result.assets?.length) || 0} assets so far — please wait</h3>
+            <h3>
+              Engine running… mined {result.ideas_count || 0} ideas ·{" "}
+              {result.assets?.length || 0} assets so far — please wait
+              {result.credits_used ? ` · ~${result.credits_used} credits spent` : ""}
+            </h3>
           ) : result.status === "canceled" ? (
             <h3>Run canceled</h3>
           ) : (
