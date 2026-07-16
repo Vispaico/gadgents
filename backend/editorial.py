@@ -193,17 +193,27 @@ def _run_stage(
     mt = _STAGE_MAX_TOKENS.get(stage, 4000)
 
     if agent_def.fusion:
-        # Use the matching Fusion preset for the chosen mode. All three keys exist; the
-        # "mixed" preset (sonnet46/qwen37/luna, judge sonnet5) contains no Opus.
-        preset = _FUSION_PRESETS[eff_mode]
+        # Use the agent's PURPOSE-TUNED fusion panel/judge when it has one (the editorial
+        # agents set their own so e.g. the Creator uses storytelling models). If the user
+        # forced a mode toggle, that mode's global preset wins (so Quality/Balanced/Eco is
+        # meaningful); otherwise fall back to the agent's tuned panel, then the mode preset.
+        if eff_mode in _FUSION_PRESETS and override_mode in ("economic", "mixed", "high"):
+            panel = _FUSION_PRESETS[eff_mode]["panel"]
+            judge = _FUSION_PRESETS[eff_mode]["judge"]
+        elif agent_def.fusion_panel:
+            panel = agent_def.fusion_panel
+            judge = agent_def.fusion_judge or _FUSION_PRESETS[eff_mode]["judge"]
+        else:
+            panel = _FUSION_PRESETS[eff_mode]["panel"]
+            judge = _FUSION_PRESETS[eff_mode]["judge"]
         result, used_id = route(
             llm,
             messages,
             model_id=None,
             goal=eff_mode,
             fusion=True,
-            panel=preset["panel"],
-            judge=preset["judge"],
+            panel=panel,
+            judge=judge,
             max_tokens=mt,
         )
         if not result:
@@ -211,13 +221,13 @@ def _run_stage(
                 f"Editorial stage '{stage}' returned an empty reply (the fusion panel "
                 "and fallback produced no content)."
             )
-        return result, used_id or (preset["judge"])
+        return result, used_id or judge
     else:
-        # Single-model stage: OVERRIDE the agent's hard Opus pin with the per-mode model
-        # so Balanced/Economic are genuinely cheap. Quality keeps Opus.
+        # Single-model stage: OVERRIDE the agent's hard pin with the per-mode model so
+        # Balanced/Economic are genuinely cheap. Anthropic-free: Quality -> ds-pro.
         single_model = {
-            "high": "or-opus",
-            "mixed": "or-sonnet46",
+            "high": "or-ds-pro",
+            "mixed": "or-qwen37",
             "economic": "or-llama33",
         }[eff_mode]
         try:

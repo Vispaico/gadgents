@@ -816,4 +816,51 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
   null-completion fallback returns usable panel content (no crash); credit-persist-on-failure edit
   in place. Frontend `npm run build` not re-run (no frontend change).
 
+## Session update (2026-07-16) — REMOVE Anthropic, per-purpose Fusion, add Aion storytelling models
+- User removed `OPENROUTER_MODEL_SONNET5` from `.env` (the `anthropic/claude-sonnet-5` judge that
+  had been null-completing and killing Editorial runs) and INSISTED all Anthropic be dropped ("I
+  don't pay money for shit, even top models"). Added two Aion Labs storytelling models to `.env`:
+  `OPENROUTER_MODEL_AION_LABS3=aion-labs/aion-3.0` and `OPENROUTER_MODEL_AION_LABS3_MINI=
+  aion-labs/aion-3.0-mini`. Verified on OpenRouter: Aion-3.0 = GLM-based multi-model storytelling
+  system ($3/$6 per 1M, 131K ctx, 100% uptime); Mini = DeepSeek-based, cheaper+faster ($0.70/$1.40,
+  70 tps). Explicitly built for narrative/voice/tension — a strong fit for the Editorial Creator.
+- ARCHITECTURE CHANGE: moved from ONE global `_FUSION_PRESETS` (shared by all Fusion agents) to
+  **per-agent purpose-tuned fusion panels**, while the Quality/Balanced/Eco toggle still overrides
+  per call. `backend/editorial.py _run_stage` now uses the agent's own `fusion_panel`/`fusion_judge`
+  (falling back to the global mode preset only if the agent has none), matching the existing
+  `run_agent` priority. So each stage/agent can carry models that fit ITS job, not a generic mix.
+- NEW CATALOG ENTRIES (`backend/router.py`): `or-aion3` (tier quality, modes high/mixed) and
+  `or-aion3-mini` (tier balanced, modes mixed/economic). `config.py` gains `openrouter_model_aion_
+  labs3` / `openrouter_model_aion_labs3_mini` (keyed exactly to the `.env` names) + `openrouter_
+  model_ids()` exposes `aion3`/`aion3_mini`. The old `or-opus`/`or-sonnet5`/`or-sonnet46`/`or-haiku`
+  catalog rows are kept (harmless defaults) but are NO LONGER referenced by any routing path.
+- DE-ANTHROPIC EVERYWHERE (verified: `grep` for or-opus/or-sonnet46/or-sonnet5/or-haiku in routing
+  returns ZERO active references):
+  * `_FUSION_PRESETS`: high = [aion3, kimi, ds-pro, oa-sol] / judge ds-pro; mixed = [aion3-mini,
+    qwen37, oa-luna, llama33] / judge aion3-mini; economic = [ds-flash-free, llama33, oa-nano] /
+    judge ds-flash.
+  * `editorial-creator` panel = [aion3, qwen37, oa-luna, llama33] / judge aion3 (storytelling-led).
+  * `editorial-quality-director` panel = [ds-pro, oa-sol, qwen37, llama33] / judge ds-pro (NO Aion
+    here — scoring is analytical, needs reliable JSON; ds-pro leads it).
+  * `content-repurposer` panel = [ds-pro, oa-sol, aion3-mini, llama33] / judge ds-pro (keeps Llama
+    3.3 per user request — "still good for repurposing" — plus Aion-mini for narrative voice).
+  * `wan-video` panel = [aion3, ds-pro, oa-sol, llama33] / judge ds-pro (Aion leads visual narrative).
+  * Editorial single-model stages (idea_miner/strategist/humanizer/multiplier): `_run_stage` map now
+    high=ds-pro, mixed=qwen37, economic=llama33 (was or-opus / or-sonnet46). The agents' own
+    `router_model="or-opus"` pins are overridden by this map, so they're inert.
+  * `lead-finder` chat: `router_model` -> `or-qwen37` (was or-sonnet46).
+  * `backend/leads/pipeline.py`: ICP panel [ds-pro, oa-sol, qwen37] / judge ds-pro (was opus);
+    AUDIT_MODEL = or-qwen37 (was or-sonnet46).
+  * `backend/pipeline.py` (Content Studio): CONTENT_PRODUCER_MODEL_BY_MODE economic=llama33,
+    mixed/balanced=qwen37, high/quality=aion3 (was sonnet46/opus); repurpose fallback
+    `model="fusion:or-aion3"` (was or-opus). `routes/wan.py` shot `model` label -> fusion:or-aion3.
+- RESULT: the ONLY model left that can bill Anthropic is if a `.env` key still points at one (opus
+  and sonnet46 keys remain in `.env` but are no longer routed). To fully guarantee zero Anthropic
+  spend, either set `OPENROUTER_MODEL_OPUS`/`OPENROUTER_MODEL_SONNET46` to non-Anthropic slugs OR
+  delete those keys. Editorial Creator now uses Aion storytelling models per the user's intent.
+- VERIFIED: all 7 touched files py_compile OK; `grep` confirms no Anthropic catalog id survives in
+  any preset/panel/map; `get_model('or-aion3')` -> aion-labs/aion-3.0 and `or-aion3-mini` ->
+  aion-labs/aion-3.0-mini resolve from `.env`; editorial-creator/quality-director/content-repurposer/
+  wan-video panels print out Anthropic-free. No frontend change.
+
 ## Next steps (per original plan + where we are)

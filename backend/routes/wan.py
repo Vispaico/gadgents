@@ -84,7 +84,7 @@ def run(
                 action=shot.get("action", ""),
                 look=shot.get("look", ""),
                 wan_prompt=shot.get("wan_prompt", ""),
-                model="fusion:or-opus",
+                model="fusion:or-aion3",
             ))
         session.commit()
 

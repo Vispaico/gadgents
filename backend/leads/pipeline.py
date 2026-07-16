@@ -40,9 +40,12 @@ from .models import (
 )
 
 # Model pins (catalog ids). Adjust freely; mirrored from other agents' posture.
-ICP_FUSION_PANEL = ["or-opus", "or-ds-pro", "oa-sol"]
-ICP_FUSION_JUDGE = "or-opus"
-AUDIT_MODEL = "or-sonnet46"        # balanced quality, cheap, reads scraped markdown
+# Lead Finder Fusion: purpose-tuned, Anthropic-free. Stage 1 (ICP + search strings)
+# wants diverse, high-recall strings -> DeepSeek-pro (analytical) + OpenAI (structured)
+# + Qwen (variety). Judge: DeepSeek-pro. Audit reads scraped markdown -> Qwen 3.7.
+ICP_FUSION_PANEL = ["or-ds-pro", "oa-sol", "or-qwen37"]
+ICP_FUSION_JUDGE = "or-ds-pro"
+AUDIT_MODEL = "or-qwen37"        # balanced quality, cheap, reads scraped markdown
 SCORING_MODEL = "or-llama33"       # economic tier: short structured scores from long audit
 
 

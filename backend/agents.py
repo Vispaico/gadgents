@@ -244,12 +244,12 @@ agent(
     description="Summarizes long articles/essays preserving the vibe and repurposes them into platform posts, media suggestions and short video scripts. Multi-model (Fusion).",
     system_prompt=REPURPOSER_SYSTEM_PROMPT,
     base_credits=12,
-    # Multi-model: panel covers analysis (DeepSeek pro), structured JSON brief
-    # (OpenAI GPT-5.x), final writing (Claude Opus), and cheap bulk variants (Llama 3.3).
-    # Judge (Claude Opus) synthesizes the final structured result.
+    # Multi-model: analysis (DeepSeek pro), structured JSON brief (OpenAI GPT-5.x),
+    # narrative voice (Aion-3.0-Mini), and cheap bulk variants (Llama 3.3 — still strong
+    # for repurposing). Anthropic-free. Judge (DeepSeek pro) synthesizes the final result.
     fusion=True,
-    fusion_panel=["or-ds-pro", "oa-sol", "or-opus", "or-llama33"],
-    fusion_judge="or-opus",
+    fusion_panel=["or-ds-pro", "oa-sol", "or-aion3-mini", "or-llama33"],
+    fusion_judge="or-ds-pro",
     router_model=None,
     mode="high",
     show_in_bots=False,  # surfaced inside Content Studio's "Repurpose" mode, not as a bare bot
@@ -283,7 +283,7 @@ agent(
     description="Turns your offer + target niche into perfect Google search strings, discovers small excellent-but-invisible firms on the public web, audits their presence, and scores fit with an outreach angle. GDPR-safe (public web only).",
     system_prompt=LEAD_FINDER_SYSTEM_PROMPT,
     base_credits=15,
-    router_model="or-sonnet46",   # balanced; the heavy lifting is in the chain, not here
+    router_model="or-qwen37",   # mixed, non-Anthropic; the heavy lifting is in the chain, not here
     mode="mixed",
     production_ready=True,
     show_in_bots=False,  # surfaced as the dedicated "Lead Finder" nav tab, not a bare bot card
@@ -309,8 +309,11 @@ agent(
     system_prompt=_build_wan_system_prompt(),
     base_credits=12,
     fusion=True,
-    fusion_panel=["or-opus", "or-ds-pro", "oa-sol", "or-sonnet46"],
-    fusion_judge="or-opus",
+    # Purpose-tuned for video-prompt generation (creative + structured camera vocabulary):
+    # Aion leads visual narrative, DeepSeek-pro + OpenAI for structure, Llama for variety.
+    # Anthropic-free.
+    fusion_panel=["or-aion3", "or-ds-pro", "oa-sol", "or-llama33"],
+    fusion_judge="or-ds-pro",
     router_model=None,
     mode="high",
 )
@@ -354,8 +357,11 @@ agent(
     system_prompt=_EDITORIAL_STAGE_PROMPTS["creator"],
     base_credits=12,
     fusion=True,
-    fusion_panel=["or-opus", "or-ds-pro", "oa-sol", "or-sonnet46"],
-    fusion_judge="or-opus",
+    # Purpose-tuned: Aion-3.0 leads the narrative (storytelling/voice/tension), with
+    # Qwen, OpenAI Luna, and Llama 3.3 adding variety. Anthropic-free. The Quality/Cost
+    # toggle still overrides this with the matching global Eco/Balanced preset.
+    fusion_panel=["or-aion3", "or-qwen37", "oa-luna", "or-llama33"],
+    fusion_judge="or-aion3",
     router_model=None,
     mode="high",
     show_in_bots=False,
@@ -378,8 +384,11 @@ agent(
     system_prompt=_EDITORIAL_STAGE_PROMPTS["quality_director"],
     base_credits=10,
     fusion=True,
-    fusion_panel=["or-opus", "or-sonnet46", "or-ds-pro"],
-    fusion_judge="or-opus",
+    # Purpose-tuned: structured/scoring work needs reliable JSON + reasoning, so a
+    # DeepSeek-pro + OpenAI + Qwen + Llama mix (NO storytelling Aion here — scoring is
+    # analytical). Anthropic-free. Quality/Cost toggle can still override per mode.
+    fusion_panel=["or-ds-pro", "oa-sol", "or-qwen37", "or-llama33"],
+    fusion_judge="or-ds-pro",
     router_model=None,
     mode="high",
     show_in_bots=False,

@@ -78,6 +78,13 @@ MODEL_CATALOG: list[ModelEntry] = [
     ModelEntry("or-mimo", "openrouter", OR["mimo"], "balanced",
                 ["mixed", "economic"], 128_000, "Xiaomi Mimo pro."),
 
+    # ---- OpenRouter: Aion Labs storytelling / narrative (purpose-fit for the
+    #      Editorial Creator fusion: narrative structure, tension, voice). ----
+    ModelEntry("or-aion3", "openrouter", OR["aion3"], "quality",
+                ["high", "mixed"], 131_000, "Aion-3.0 multi-model storytelling system (GLM-based)."),
+    ModelEntry("or-aion3-mini", "openrouter", OR["aion3_mini"], "balanced",
+                ["mixed", "economic"], 131_000, "Aion-3.0-Mini storytelling (DeepSeek-based), cheaper+faster."),
+
     # ---- OpenRouter: fast / Very Economic ----
     ModelEntry("or-haiku", "openrouter", OR["haiku"], "fast",
                 ["economic", "mixed"], 200_000, "Fast, cheap Claude for light work."),
@@ -177,19 +184,20 @@ def route(
     )
 
 
-# Default Fusion panel + judge per mode.
+# Default Fusion panel + judge per mode (Anthropic-free: no opus/sonnet/haiku).
+# Individual agents override these with purpose-tuned fusion_panel/fusion_judge.
 _FUSION_PRESETS: dict[str, dict] = {
     "high": {
-        "panel": ["or-opus", "or-kimi", "or-ds-pro", "oa-sol"],
-        "judge": "or-opus",
+        "panel": ["or-aion3", "or-kimi", "or-ds-pro", "oa-sol"],
+        "judge": "or-ds-pro",
     },
     "mixed": {
-        "panel": ["or-sonnet46", "or-qwen37", "oa-luna"],
-        "judge": "or-sonnet5",
+        "panel": ["or-aion3-mini", "or-qwen37", "oa-luna", "or-llama33"],
+        "judge": "or-aion3-mini",
     },
     "economic": {
-        "panel": ["or-ds-flash-free", "or-haiku", "oa-nano"],
-        "judge": "or-haiku",
+        "panel": ["or-ds-flash-free", "or-llama33", "oa-nano"],
+        "judge": "or-ds-flash",
     },
 }
 

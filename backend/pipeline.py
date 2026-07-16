@@ -23,17 +23,17 @@ from backend.db import (
 from backend.llm import LLMClient
 from sqlmodel import Session, select
 
-# Content Studio stage-2 (content-producer) model per quality/cost mode:
-#   economic  -> current cheap pin (or-llama33) — same as the agent default
-#   balanced  -> or-sonnet46 (Claude Sonnet 4.6) for better voice/copy
-#   quality   -> or-opus (Claude Opus 4.8) for top-tier social copy
+# Content Studio stage-2 (content-producer) model per quality/cost mode (Anthropic-free):
+#   economic  -> or-llama33 (cheap bulk copy)
+#   mixed/balanced -> or-qwen37 (strong, cheap voice/copy)
+#   high/quality -> or-aion3 (Aion storytelling model for top-tier narrative copy)
 # prompt-engineer (stage 1) stays pinned on or-qwen37 regardless of mode.
 CONTENT_PRODUCER_MODEL_BY_MODE = {
     "economic": "or-llama33",
-    "mixed": "or-sonnet46",
-    "balanced": "or-sonnet46",
-    "high": "or-opus",
-    "quality": "or-opus",
+    "mixed": "or-qwen37",
+    "balanced": "or-qwen37",
+    "high": "or-aion3",
+    "quality": "or-aion3",
 }
 
 # Map Content Studio platform labels to the repurposer's channel ids.
@@ -213,7 +213,7 @@ def _persist_repurpose(
     session.commit()
     session.refresh(brief)
 
-    model = "fusion:or-opus"
+    model = "fusion:or-aion3"
     for ch in channels:
         block = data.get("posts", {}).get(ch)
         if block:

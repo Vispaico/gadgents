@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     openrouter_model_ds_flash: str = "deepseek/deepseek-v4-flash"
     openrouter_model_ds_flash_free: str = "deepseek/deepseek-v4-flash:free"
     openrouter_model_owl: str = "openrouter/owl-alpha"
+    # Aion Labs storytelling/narrative models — purpose-fit for the Editorial Creator
+    # stage (narrative structure, tension, voice). .env keys: OPENROUTER_MODEL_AION_LABS3
+    # (full) and OPENROUTER_MODEL_AION_LABS3_MINI (cheaper, DeepSeek-based).
+    openrouter_model_aion_labs3: str = "aion-labs/aion-3.0"
+    openrouter_model_aion_labs3_mini: str = "aion-labs/aion-3.0-mini"
 
     # Billing
     credit_price_per_usd: int = 100  # 100 credits == $1.00
@@ -120,6 +125,8 @@ def openrouter_model_ids() -> dict[str, str]:
         "ds_flash": s.openrouter_model_ds_flash,
         "ds_flash_free": s.openrouter_model_ds_flash_free,
         "owl": s.openrouter_model_owl,
+        "aion3": s.openrouter_model_aion_labs3,
+        "aion3_mini": s.openrouter_model_aion_labs3_mini,
     }
 
 
