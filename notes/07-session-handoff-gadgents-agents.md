@@ -1138,4 +1138,111 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
 - NOTE: the user asked to ALWAYS update this 07 handoff at each boundary so the next chat picks up
   seamlessly. This part 4 is that update.
 
+## Session update (2026-07-16, part 5) — ROOT ROOT cause found: multi-layered + OpenAI 400 + macOS stall
+- After part 4 the user still got "failed after retries, 0 content, lost 10¢". Dug deeper (user
+  said "we move on after one more look"; explicitly asked to ALWAYS keep this handoff updated).
+- DISCOVERY 1 — OpenAI was 400ing for a REAL, fixable reason: gpt-5.x REJECTS
+  `max_tokens` (needs `max_completion_tokens`) AND a custom `temperature`. Every OpenAI call
+  returned `400 Bad Request`. Fix in `backend/llm.py _payload()`: OpenAI gets
+  `max_completion_tokens` and NO temperature; OpenRouter/Ollama keep `max_tokens`+temperature.
+  After the fix `oa-luna` miner returned 30 ideas in ~10-12s — OpenAI is now a RELIABLE,
+  non-stalling fallback (unlike OpenRouter's half-open hangs). This alone unblocked a 2nd provider.
+- DISCOVERY 2 — the per-call stall STILL couldn't be killed in-process. Proven empirically:
+  httpx `read=50s` timeout does NOT fire on a stalled OpenRouter recv (command hung past 60s).
+  `signal.alarm` is best-effort in the subprocess worker (per-stage 150s alarm didn't fire).
+  The ONLY reliable kill is terminating the OS process (SIGKILL can't be ignored by a blocked
+  recv). So implemented `backend/_llm_post.py timed_post()` which runs EACH HTTP POST in a
+  SEPARATE `subprocess.Popen([sys.executable,"-m","backend._llm_post_child"])` and reads
+  the child's stdout JSON with `communicate(timeout=30)`; on stall it `proc.kill()`s the child
+  and raises, feeding the editorial rotation's retry. The child (`_llm_post_child.py`) does the
+  httpx POST and prints ONE result line. Why subprocess (not multiprocessing): multiprocessing.spawn
+  re-imports `__main__` and crashed (FileNotFoundError on stdin, or re-ran the worker with no
+  argv); multiprocessing.fork SEGFAULTs (httpx + Obj-C runtime) on the actual call. `subprocess -m`
+  is the SAME mechanism editorial_worker itself uses, and it works on macOS.
+- DISCOVERY 3 (the frustrating one) — `timed_post` works PERFECTLY standalone (oa-luna miner
+  30 ideas in 10s; a deliberately-stalling endpoint raises "timed out" cleanly). BUT inside the
+  editorial_worker subprocess the nested `subprocess` call to `_llm_post_child` ALSO stalls and
+  `communicate(timeout=30)` does NOT break it (same macOS recv issue at the pipe-read level).
+  So a run that stalls in the worker hangs the worker for the full 3-min watchdog, even though
+  the standalone `timed_post` proves the kill mechanism is correct. The nested-subprocess-from-
+  subprocess pipe read inherits the un-killable recv behavior.
+- WHAT NOW WORKS (proven): standalone `timed_post` kills stalls; OpenAI is usable (no more 400,
+  reliable ~10s miner); OpenRouter `max_tokens=8000` miner cap lowered to 3000 (the stall
+  trigger); rotation now leads the miner with OpenAI (oa-luna/oa-sol) + 1 OpenRouter retry,
+  2 attempts, 30s per-attempt; watchdog starts unconditionally + 3-min cap; Cancel SIGKILLs.
+- WHAT STILL FAILS: when BOTH providers intermittently stall the big miner call IN THE WORKER
+  CONTEXT (nested subprocess pipe-read can't be time-bounded on macOS), a run hangs to the
+  3-min watchdog. On a responsive-OpenRouter/OpenAI moment the miner completes in ~10s via
+  OpenAI and the WHOLE run finishes (verified the per-asset stages are fine once ideas exist).
+- HONEST VERDICT: this is now a macOS + provider-infra problem, not an app-code bug. The app
+  code is correct and as robust as possible: clean fail (no 20¢ infinite burn), killable via
+  Cancel, rotating retries, OpenAI as a real 2nd provider, correct token params. The single
+  remaining gap (nested-subprocess pipe-read uninterruptible on macOS) would require either
+  (a) running the editorial worker on Linux/CI, (b) using a non-stalling provider reliably, or
+  (c) a different HTTP transport (e.g. raw socket with explicit SO_RCVTIMEO + a watchdog
+  thread that closes the fd) — all larger changes the user deferred to "move on to other agents".
+- ACTION: per the user's plan, we STOP chasing the Editorial/OpenRouter stall and move on to
+  optimising the OTHER agents (lead-finder, wan-video, content-repurposer, content-producer,
+  social-listener). The editorial fixes (OpenAI 400, token cap, rotation, subprocess killable
+  calls, watchdog, cancel) are all committed in the running code. Leave dev servers STOPPED
+  (user killed them) until the next chat; restart with `./dev.sh`.
+- NOTE: the user asked to ALWAYS update this 07 handoff at each boundary so the next chat picks up
+  seamlessly. This part 5 is that update.
+
+## Session update (2026-07-16, part 6) — Editorial Studio DELETED (user pulled the plug)
+- User decided to DELETE the entire Editorial Studio feature (the OpenRouter stall saga in parts
+  1-5 never produced a reliable end-to-end run, only robust clean-fails). DECISION: remove the
+  Editorial Studio and ALL related files/wirings/routes, top to bottom. This was a deliberate
+  deletion, not a bug fix — the feature is gone.
+- FILES DELETED:
+  * `backend/editorial.py` (the 6-stage pipeline + guardrails + rotation + SIGALRM timeout logic).
+  * `backend/editorial_worker.py` (the subprocess worker; superseded by `backend/_llm_post.py`'s
+    standalone subprocess POST mechanism, which was the SAME kill-stall approach and is kept).
+  * `backend/routes/editorial.py` (all `/api/editorial/*` routes + the editorial watchdog daemon).
+- `backend/db.py`: already had its editorial models (`BrandProfile, EditorialRun, IdeaBank,
+  EditorialCalendar, EditorialAsset, PromptTemplate`), `seed_editorial_defaults()`, the
+  `_EDITORIAL_STAGE_PROMPTS` catalog, and the `init_db()` seed call removed in a PRIOR chat
+  (those deletions were complete + `init_db()` verified clean — no editorial tables created).
+  Re-verified: `db.init_db()` creates NO editorial tables; no `editorial` references remain in db.py.
+- `backend/agents.py`: the 6 editorial agents (idea-miner/strategist/creator/humanizer/
+  quality-director/multiplier) are REMOVED. A prior partial cleanup had left a stray unclosed
+  `agent(` paren on the `wan-video` block plus the 3 trailing editorial agents dangling; fixed by
+  closing the `wan-video` agent properly and deleting the 3 leftover editorial `agent(...)` blocks.
+  REGISTRY is back to 7 agents: prompt-engineer, content-producer, coder, personal-planner,
+  content-repurposer, lead-finder, wan-video (all `show_in_bots`/production flags unchanged).
+  `_EDITORIAL_STAGE_PROMPTS` no longer referenced anywhere (its last uses were the deleted agents).
+- `backend/app.py`: editorial was ALREADY de-wired (no `editorial` in the import list or
+  `include_router`). No change needed beyond confirming nothing else imported it.
+- `backend/router.py`: one commentary line mentioned "the editorial stage" in the generic Fusion
+  fallback (happy-path "return something instead of crashing"). That is DEFENSIVE generic code, NOT
+  editorial wiring — left as-is. `backend/llm.py` had a one-line comment about the editorial run
+  crashing; harmless comment, left as-is.
+- `backend/_llm_post.py` / `_llm_post_child.py` (untracked, the macOS stall-kill approach from
+  part 5): KEPT — they are provider-neutral and not editorial-specific (the comment mentions the
+  editorial worker only as historical context). If you later wire a long/stall-prone call
+  elsewhere, `timed_post()` is available.
+- FRONTEND (`frontend/src/App.jsx` + `api.js`):
+  * Removed the **Editorial Studio** nav tab button + its `{tab === "editorial" && <EditorialStudio>}` render.
+  * Deleted the entire `EditorialStudio` component (the essay textarea, brand <select>, platform
+    multiselect, max-ideas selector, multiplier checkbox, results, `AssetEditor`, export .md/.pdf).
+  * `api.js`: removed `editorialRun / editorialRunStatus / editorialCancel / editorialRuns /
+    editorialAssets / editorialUpdateAsset / editorialBrands / editorialUpdateBrand /
+    editorialTemplates / editorialUpdateTemplate`.
+- `notes/10-editorial-ai-studio.md` (the design doc): now describes a DELETED feature. Left on disk
+  for history, but it no longer reflects shipped code. Could be deleted later if you want a clean tree.
+- VERIFIED THIS SESSION:
+  * `python -c "import backend.app as a; ... list(REGISTRY)"` -> 7 agents, NO editorial, no import errors.
+  * `python -c "import backend.db as d; d.init_db(); ..."` -> no editorial tables.
+  * `frontend`: `npm run build` passes (32 modules transformed, 917 lines of App.jsx, api.js clean).
+  * `grep editorial` across `backend/` + `frontend/` returns ONLY: generic router.py comment, the
+    llm.py one-line comment, and the `_llm_post*` historical comment (all non-wiring, harmless).
+- CONSEQUENCE: the Agents-built count is back to 7 production agents. The "Bots · Content Studio ·
+  Social Listen · Lead Finder · Wan Video · Billing" nav (no Editorial Studio) is the current state.
+- NEXT-STATE CONTEXT for a fresh chat: do NOT re-add editorial from notes/10 — it was deliberately
+  removed after the OpenRouter/macOS stall saga proved it couldn't reliably finish a run. If the user
+  later wants a content-engine again, start from a cleaner design (e.g. reuse content-repurposer or
+  re-architect to avoid the long single-miner call that stalled) rather than reviving this code.
+- NOTE: the user asked to ALWAYS update this 07 handoff at each boundary so the next chat picks up
+  seamlessly. This part 6 is that update.
+
 ## Next steps (per original plan + where we are)

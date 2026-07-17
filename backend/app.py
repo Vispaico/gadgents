@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import get_settings
 from backend.db import init_db
-from backend.routes import agents, auth, billing, pipeline, router as router_routes, planner, leadfinder, wan, social, editorial
+from backend.routes import agents, auth, billing, pipeline, router as router_routes, planner, leadfinder, wan, social
 from backend.routes.agents import close_llm
 from backend.routes.router import close_router_llm
 from backend.routes.planner import close_planner_llm
@@ -19,14 +19,6 @@ _settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    # Reap any editorial run orphaned by a previous server kill (otherwise it shows
-    # perpetual "running" and can't be canceled).
-    with Session(get_engine()) as s:
-        from backend.editorial import reap_interrupted_runs
-
-        reaped = reap_interrupted_runs(s)
-    if reaped:
-        print(f"[editorial] reaped {reaped} interrupted run(s) from a previous process")
     yield
     close_llm()
     close_router_llm()
@@ -54,7 +46,6 @@ app.include_router(planner.router)
 app.include_router(leadfinder.router)
 app.include_router(wan.router)
 app.include_router(social.router)
-app.include_router(editorial.router)
 
 
 @app.get("/health")

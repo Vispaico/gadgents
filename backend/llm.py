@@ -12,6 +12,7 @@ import time
 from typing import Optional
 
 from backend.config import get_settings, ProviderName
+from backend import _llm_post
 
 OpenAIChatMessage = dict  # {"role": "system"|"user"|"assistant", "content": str}
 
@@ -101,6 +102,28 @@ class LLMClient:
             h.cooldown_until = time.time() + 20  # 20s cooldown (per model)
         self._health[key] = h
 
+    def _payload(self, provider: str, model: str, messages, temperature: float, max_tokens: int) -> dict:
+        """Build the chat/completions body with the provider-correct token param.
+
+        OpenAI's current models (gpt-5.x) REJECT `max_tokens` with a 400 and require
+        `max_completion_tokens`. OpenRouter/Ollama still use `max_tokens`. Sending the
+        wrong key is why every OpenAI call was 400ing — so OpenAI was never a usable
+        fallback when OpenRouter stalled (we just paid for dead OpenRouter calls)."""
+        body = {
+            "model": model,
+            "messages": messages,
+        }
+        if provider == "openai":
+            # gpt-5.x rejects `max_tokens` (needs `max_completion_tokens`) AND a custom
+            # `temperature` (reasoning models use the default). Sending either 400s the
+            # call — which is why OpenAI was never a usable fallback and we kept paying
+            # for dead OpenRouter stalls.
+            body["max_completion_tokens"] = max_tokens
+        else:
+            body["temperature"] = temperature
+            body["max_tokens"] = max_tokens
+        return body
+
     def complete(
         self,
         messages: list[OpenAIChatMessage],
@@ -120,25 +143,32 @@ class LLMClient:
                 continue
             resolved_model = model or DEFAULT_MODELS.get(provider, "gpt-4.1-mini")
             try:
-                resp = self._client.post(
+                # Run the POST out-of-process so a stalled OpenRouter recv can be SIGKILLed
+                # at the OS level (httpx's read timeout + signal.alarm BOTH fail to interrupt
+                # a half-open recv on macOS). _llm_post.timed_post bounds every call by
+                # wall-clock and raises on stall, feeding the caller's retry/fallback.
+                _data, _status = _llm_post.timed_post(
                     f"{base_url.rstrip('/')}/chat/completions",
-                    headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
-                    json={
-                        "model": resolved_model,
-                        "messages": messages,
-                        "temperature": temperature,
-                        "max_tokens": max_tokens,
-                    },
+                    {"Authorization": f"Bearer {api_key}"} if api_key else {},
+                    self._payload(provider, resolved_model, messages, temperature, max_tokens),
+                    timeout_s=30,
                 )
-                resp.raise_for_status()
-                data = resp.json()
+                if _status >= 400:
+                    detail = ""
+                    if isinstance(_data, dict) and _data.get("error"):
+                        detail = f" API error: {_data['error']}"
+                    raise RuntimeError(
+                        f"{provider}/{resolved_model} returned no completions "
+                        f"(status {_status}).{detail}"
+                    )
+                data = _data
                 if not isinstance(data, dict) or not data.get("choices"):
                     detail = ""
                     if isinstance(data, dict) and data.get("error"):
                         detail = f" API error: {data['error']}"
                     raise RuntimeError(
                         f"{provider}/{resolved_model} returned no completions "
-                        f"(status {resp.status_code}).{detail}"
+                        f"(status {_status}).{detail}"
                     )
                 choice = data["choices"][0]["message"]["content"]
                 if not choice:
@@ -163,10 +193,6 @@ class LLMClient:
                 self._mark_failure(provider, resolved_model)
         raise RuntimeError(f"All LLM providers failed. Last error: {last_error}")
 
-    def _post_with_deadline(self, *args, **kwargs) -> "httpx.Response":
-        """POST through the shared client (httpx enforces connect/read/write timeouts)."""
-        return self._client.post(*args, **kwargs)
-
     def close(self) -> None:
         self._client.close()
 
@@ -188,18 +214,21 @@ class LLMClient:
         if base_url is None or (provider != "ollama" and not api_key):
             raise RuntimeError(f"Provider unavailable (no base_url/key): {provider}")
         try:
-            resp = self._client.post(
+            # Out-of-process POST so a stalled recv is OS-killable (see complete()).
+            _data, _status = _llm_post.timed_post(
                 f"{base_url.rstrip('/')}/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"} if api_key else {},
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                },
+                {"Authorization": f"Bearer {api_key}"} if api_key else {},
+                self._payload(provider, model, messages, temperature, max_tokens),
+                timeout_s=30,
             )
-            resp.raise_for_status()
-            data = resp.json()
+            if _status >= 400:
+                detail = ""
+                if isinstance(_data, dict) and _data.get("error"):
+                    detail = f" API error: {_data['error']}"
+                raise RuntimeError(
+                    f"{provider}/{model} returned no completions (status {_status}).{detail}"
+                )
+            data = _data
             # OpenRouter/OpenAI return {"error": {...}} (or an empty "choices") on many
             # failure modes (throttle, content filter, model unavailable). Indexing
             # choices[0] blindly crashed the whole editorial run with a cryptic
