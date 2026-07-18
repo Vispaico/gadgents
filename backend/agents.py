@@ -113,7 +113,7 @@ agent(
     description="Answers coding questions and writes small code snippets.",
     system_prompt="You are a concise senior software engineer. Provide working code and short explanations.",
     base_credits=5,
-    router_model="oa-codex",  # OpenAI gpt-5.1-codex (coding model, free daily quota)
+    router_model="nv-laguna",  # NVIDIA NIM free: poolside/laguna-xs-2.1 (OpenAI codex dropped)
 )
 
 # ---------------------------------------------------------------------------

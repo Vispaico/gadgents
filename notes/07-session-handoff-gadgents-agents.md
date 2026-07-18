@@ -1245,4 +1245,53 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
 - NOTE: the user asked to ALWAYS update this 07 handoff at each boundary so the next chat picks up
   seamlessly. This part 6 is that update.
 
+## Session update (2026-07-18) — .env model keys renamed with price suffixes + NVIDIA/DeepSeek providers added
+- User overhauled `.env`: every model key now carries a `__<in_cents>__<out_cents>` price suffix
+  (e.g. `OPENROUTER_MODEL_QWEN37__0_32__01_28=qwen/qwen3.7-plus` => 0.32¢ in / 01.28¢ out) for
+  cost visibility, and added NVIDIA NIM (free hosted) + DeepSeek (direct) models. Deleted the
+  OpenAI `codex` / `mini` / `nano` keys. Required a refactor so the code still resolves models.
+- `backend/config.py`: added `nvidia_api_key`, `deepseek_api_key`, and `llm_provider_order` is now
+  `openrouter,nvidia,openai,deepseek,ollama`. Each model field now carries a pydantic `Field(alias=...)`
+  pointing at the EXACT new `.env` key (e.g. `openrouter_model_qwen37` -> alias
+  `OPENROUTER_MODEL_QWEN37__0_32__01_28`), so internal code keeps clean names while the env key can
+  change with prices. Added `nvidia_model_ids()` + `deepseek_model_ids()` resolvers. Dropped the
+  `openai_model_codex/mini/nano` fields. New NVIDIA fields: `ds4flfree` (poolside/laguna-xs-2.1),
+  `nena3` (nemotron-3-nano), `nesu3` (nemotron-3-super), `neul3` (nemotron-3-ultra). DeepSeek:
+  `ds4pro`, `ds4flash`.
+- `backend/llm.py`: wired `nvidia` + `deepseek` providers — `BASE_URLS` now includes
+  `nvidia: https://integrate.api.nvidia.com/v1` (OpenAI-compatible) and
+  `deepseek: https://api.deepseek.com/v1`; both added to `_api_key` + `DEFAULT_MODELS`;
+  `ProviderName` extended with `nvidia`/`deepseek`. (DeepSeek uses `max_tokens`+temperature like
+  OpenRouter/`_payload` already handles per-provider token params.)
+- `backend/router.py`: `MODEL_CATALOG` now has NVIDIA entries (`nv-laguna`, `nv-nena3`, `nv-nesu3`,
+  `nv-neul3`) and DeepSeek entries (`ds4pro`, `ds4flash`). Dropped `oa-codex` / `oa-mini` / `oa-nano`
+  catalog rows (those OpenAI keys were deleted from `.env`). The economic Fusion preset panel
+  `oa-nano` was replaced with `nv-nena3` (free NVIDIA nano-class) so the economic tier still has a
+  3rd cheap member beside `or-ds-flash-free` + `or-llama33`. `oa-sol` / `oa-luna` / `oa-terra` kept
+  (still in `.env`). `import` of `nvidia_model_ids` / `deepseek_model_ids` added.
+- `backend/agents.py`: the **coder** agent now uses `router_model="nv-laguna"` (NVIDIA NIM free
+  `poolside/laguna-xs-2.1`) instead of the deleted OpenAI `oa-codex`. User said: use this for now,
+  optimise the coder model choice later. All other 6 agents unchanged (prompt-engineer or-qwen37,
+  content-producer or-llama33, personal-planner mode=high, content-repurposer + wan-video Fusion
+  panels unchanged).
+- VERIFIED: `import backend.app` OK; `openrouter/openai/nvidia/deepseek_model_ids()` all resolve from
+  `.env` (e.g. `or-qwen37->qwen/qwen3.7-plus`, `or-kimi->moonshotai/kimi-k3`, `nv-laguna->poolside/
+  laguna-xs-2.1`, `ds4pro->deepseek-v4-pro`); catalog has the 4 NVIDIA + 2 DeepSeek entries; `oa-codex/
+  mini/nano` absent; `coder.router_model == "nv-laguna"`; frontend `npm run build` passes. No stale
+  `oa-codex/mini/nano` references remain in active code.
+- CURRENT CATALOG EXPOSED TO ROUTING (catalog ids): OpenRouter `or-opus, or-sonnet5, or-sonnet46,
+  or-kimi, or-ds-pro, or-nex, or-qwen37/36/35, or-glm, or-hy3, or-nemotron, or-mimo, or-haiku,
+  or-llama33, or-ds-flash, or-ds-flash-free, or-owl, or-aion3, or-aion3-mini`; OpenAI `oa-sol,
+  oa-terra, oa-luna`; NVIDIA `nv-laguna, nv-nena3, nv-nesu3, nv-neul3`; DeepSeek `ds4pro, ds4flash`;
+  Ollama `local-ollama`. (The router's `MODEL_CATALOG` also still DEFINES `or-opus/sonnet*/haiku`
+  etc. for completeness, but no agent/Fusion preset routes to Anthropic now — only if a future
+  router edit re-adds them.)
+- REMINDER for next chat: when the user edits a `__price__` suffix in `.env`, the matching alias in
+  `config.py` must change too (they travel together). The NVIDIA/DeepSeek mirrors are intended as the
+  basis for a BETTER future router (free tiers); active agents still mostly use OpenRouter today
+  except coder (nv-laguna). Lead Finder (`backend/leads/pipeline.py`) still uses `or-ds-pro` (ICP
+  panel judge), `or-qwen37` (audit), `or-llama33` (scoring), `oa-sol` (panel) — all valid.
+- NOTE: the user asked to ALWAYS update this 07 handoff at each boundary so the next chat picks up
+  seamlessly. This 2026-07-18 update is that update.
+
 ## Next steps (per original plan + where we are)

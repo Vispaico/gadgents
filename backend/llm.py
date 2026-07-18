@@ -45,6 +45,8 @@ DEFAULT_MODELS: dict[ProviderName, str] = {
     "openai": "gpt-5.6-luna",
     "groq": "llama-3.3-70b-versatile",
     "openrouter": "openai/gpt-4.1-mini",
+    "nvidia": "nvidia/nemotron-3-super-120b-a12b",
+    "deepseek": "deepseek-v4-pro",
     "ollama": "qwen3.5:latest",
 }
 
@@ -52,6 +54,8 @@ BASE_URLS = {
     "openai": "https://api.openai.com/v1",
     "groq": "https://api.groq.com/openai/v1",
     "openrouter": "https://openrouter.ai/api/v1",
+    "nvidia": "https://integrate.api.nvidia.com/v1",
+    "deepseek": "https://api.deepseek.com/v1",
     # ollama base url comes from env
 }
 
@@ -74,6 +78,8 @@ class LLMClient:
             "openai": self._settings.openai_api_key,
             "groq": self._settings.groq_api_key,
             "openrouter": self._settings.openrouter_api_key,
+            "nvidia": self._settings.nvidia_api_key,
+            "deepseek": self._settings.deepseek_api_key,
         }
         return keys.get(provider) or None
 

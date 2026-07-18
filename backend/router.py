@@ -23,7 +23,7 @@ Provider strategy (cost control):
 from dataclasses import dataclass
 from typing import Optional
 
-from backend.config import ProviderName, openai_model_ids, openrouter_model_ids
+from backend.config import ProviderName, openai_model_ids, openrouter_model_ids, nvidia_model_ids, deepseek_model_ids
 from backend.llm import LLMClient, OpenAIChatMessage
 
 # ---------------------------------------------------------------------------
@@ -45,6 +45,8 @@ class ModelEntry:
 # the catalog reflects whatever exact names are in .env.
 OA = openai_model_ids()
 OR = openrouter_model_ids()
+NV = nvidia_model_ids()
+DS = deepseek_model_ids()
 
 MODEL_CATALOG: list[ModelEntry] = [
     # ---- OpenRouter: frontier / quality ----
@@ -102,14 +104,24 @@ MODEL_CATALOG: list[ModelEntry] = [
                 ["high", "mixed"], 400_000, "OpenAI flagship (1M group). Use for hard tasks."),
     ModelEntry("oa-terra", "openai", OA["terra"], "quality",
                 ["high", "mixed"], 400_000, "OpenAI large flagship (10M group)."),
-    ModelEntry("oa-codex", "openai", OA["codex"], "quality",
-                ["high", "mixed"], 400_000, "OpenAI coding/reasoning model."),
     ModelEntry("oa-luna", "openai", OA["luna"], "balanced",
                 ["mixed", "economic"], 400_000, "OpenAI balanced (10M group); Mixed default."),
-    ModelEntry("oa-mini", "openai", OA["mini"], "fast",
-                ["economic", "mixed"], 400_000, "OpenAI mini; cheap."),
-    ModelEntry("oa-nano", "openai", OA["nano"], "fast",
-                ["economic"], 400_000, "OpenAI nano; cheapest."),
+
+    # ---- NVIDIA NIM (free, OpenAI-compatible): OpenAI drop-ins + free mirrors ----
+    ModelEntry("nv-laguna", "nvidia", NV["ds4flfree"], "fast",
+                ["economic", "mixed"], 128_000, "Poolside Laguna XS 2.1 (coder drop-in; free on NVIDIA)."),
+    ModelEntry("nv-nena3", "nvidia", NV["nena3"], "fast",
+                ["economic", "mixed"], 128_000, "Nemotron-3-nano free; nano-class cheap model."),
+    ModelEntry("nv-nesu3", "nvidia", NV["nesu3"], "balanced",
+                ["mixed", "economic"], 128_000, "Nemotron-3-super free; balanced workhorse."),
+    ModelEntry("nv-neul3", "nvidia", NV["neul3"], "quality",
+                ["high", "mixed"], 128_000, "Nemotron-3-ultra free; frontier-class."),
+
+    # ---- DeepSeek platform (direct, OpenAI-compatible): cheap frontline ----
+    ModelEntry("ds4pro", "deepseek", DS["ds4pro"], "quality",
+                ["high", "mixed"], 128_000, "DeepSeek-v4-pro (direct, cheaper than OpenRouter)."),
+    ModelEntry("ds4flash", "deepseek", DS["ds4flash"], "fast",
+                ["economic", "mixed"], 128_000, "DeepSeek-v4-flash (direct, cheap)."),
 
     # ---- Ollama: local free fallback ----
     ModelEntry("local-ollama", "ollama", "qwen3.5:latest", "fast",
@@ -196,7 +208,7 @@ _FUSION_PRESETS: dict[str, dict] = {
         "judge": "or-aion3-mini",
     },
     "economic": {
-        "panel": ["or-ds-flash-free", "or-llama33", "oa-nano"],
+        "panel": ["or-ds-flash-free", "or-llama33", "nv-nena3"],
         "judge": "or-ds-flash",
     },
 }
