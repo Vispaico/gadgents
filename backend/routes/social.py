@@ -89,6 +89,25 @@ def list_queries(
     ]
 
 
+@router.delete("/queries/{query_id}")
+def delete_query(
+    query_id: int,
+    user: User = Depends(get_current_user) if _settings.require_login else None,
+    session: Session = Depends(get_session),
+):
+    if not _settings.require_login or user is None:
+        user = get_or_create_dev_user(session)
+    query = session.get(SocialQuery, query_id)
+    if query is None or query.user_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Query not found")
+    # Cascade-delete the posts belonging to this query.
+    for post in session.exec(select(SocialPost).where(SocialPost.query_id == query_id)).all():
+        session.delete(post)
+    session.delete(query)
+    session.commit()
+    return {"deleted": query_id}
+
+
 @router.get("/queries/{query_id}/posts")
 def list_posts(
     query_id: int,

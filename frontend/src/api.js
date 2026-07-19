@@ -60,6 +60,10 @@ export const api = {
     req("POST", "/social/listen", { topic, platforms, limit }),
   socialQueries: () => req("GET", "/social/queries"),
   socialPosts: (queryId) => req("GET", `/social/queries/${queryId}/posts`),
+  socialDelete: (queryId) => req("DELETE", `/social/queries/${queryId}`),
+  brainSave: (title, body, meta = {}) =>
+    req("POST", "/brain/save", { title, body, meta }),
+  brainStatus: () => req("GET", "/brain/status"),
   leadIcpChat: (message, history) =>
     req("POST", "/leadfinder/icp-chat", { message, history }),
   leadRun: (icp) => req("POST", "/leadfinder/run", { icp }),

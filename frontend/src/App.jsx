@@ -125,6 +125,10 @@ function Home({ user, setError, onBought, onLogout }) {
   const [tab, setTab] = useState("bots");
   const [wanSeed, setWanSeed] = useState("");  // concept passed from Content Studio -> Wan tab
   const [studioSeed, setStudioSeed] = useState("");  // post text passed from Social Listen -> Content Studio
+  // Lift Social Listen results into Home so they survive tab switches (the component
+  // unmounts on navigation, so local state was being lost every time).
+  const [socialPosts, setSocialPosts] = useState([]);
+  const [socialQueries, setSocialQueries] = useState([]);
   return (
     <div className="app">
       <header>
@@ -156,6 +160,10 @@ function Home({ user, setError, onBought, onLogout }) {
           <SocialListen
             user={user}
             setError={setError}
+            posts={socialPosts}
+            setPosts={setSocialPosts}
+            queries={socialQueries}
+            setQueries={setSocialQueries}
             onRepurpose={(text) => { setStudioSeed(text); setTab("content"); }}
           />
         )}
@@ -268,6 +276,12 @@ const CONTENT_OUTPUTS = [
 
 function ContentStudio({ user, setError, onSendToWan, seed = "" }) {
   const [material, setMaterial] = useState(seed);
+  // Keep the editor in sync with a hand-off seed (from Social Listen "Repurpose").
+  // Without this, switching tabs remounts the component and a delayed seed update
+  // could be missed; the effect guarantees the latest seed always lands in the box.
+  useEffect(() => {
+    if (seed) setMaterial((cur) => (cur ? cur + "\n\n" + seed : seed));
+  }, [seed]);
   const [urls, setUrls] = useState("");
   const [instructions, setInstructions] = useState("");
   const [platforms, setPlatforms] = useState(["Instagram", "TikTok"]);
@@ -283,6 +297,22 @@ function ContentStudio({ user, setError, onSendToWan, seed = "" }) {
       setOpenBrief(await api.pipelineBrief(id));
     } catch (e) {
       setErr(e.message);
+    }
+  }
+
+  const [brainMsg, setBrainMsg] = useState("");
+  async function saveResult() {
+    if (!result) return;
+    const body = [
+      result.prompts ? `## Prompts\n${result.prompts}` : "",
+      result.content ? `## Content\n${result.content}` : "",
+    ].filter(Boolean).join("\n\n");
+    setBrainMsg("Saving to brain…");
+    try {
+      const res = await api.brainSave(`Content Studio (${output})`, body, { mode: output });
+      setBrainMsg(res.indexed ? `Saved to brain ✓ (indexed)` : `Saved to brain ✓ (${res.note || "file only"})`);
+    } catch (e) {
+      setBrainMsg("Brain save failed: " + e.message);
     }
   }
 
@@ -382,8 +412,13 @@ function ContentStudio({ user, setError, onSendToWan, seed = "" }) {
         {busy ? "Generating…" : `Generate: ${CONTENT_OUTPUTS.find((o) => o.id === output).label}`}
       </button>
       {err && <div className="error">{err}</div>}
+      {brainMsg && <div className="error" style={{ color: "#7ee787" }}>{brainMsg}</div>}
       {result && (
         <div className="result">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <h3 style={{ margin: 0 }}>Result</h3>
+            <button className="link" onClick={saveResult}>🧠 Save to Brain</button>
+          </div>
           {output === "prompts" && result.prompts && (
             <>
               <h3>Prompts</h3>
@@ -438,13 +473,12 @@ function ContentStudio({ user, setError, onSendToWan, seed = "" }) {
   );
 }
 
-function SocialListen({ user, setError, onRepurpose }) {
+function SocialListen({ user, setError, onRepurpose, posts, setPosts, queries, setQueries }) {
   const [topic, setTopic] = useState("");
   const [platforms, setPlatforms] = useState(["x"]);
-  const [posts, setPosts] = useState([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [queries, setQueries] = useState([]);
+  const [brainMsg, setBrainMsg] = useState("");
 
   function toggle(p) {
     setPlatforms((cur) => (cur.includes(p) ? cur.filter((x) => x !== p) : [...cur, p]));
@@ -486,6 +520,27 @@ function SocialListen({ user, setError, onRepurpose }) {
     onRepurpose(header + post.text);
   }
 
+  async function savePost(post) {
+    const title = `${post.platform} post${post.author ? " by " + post.author : ""}`;
+    const body = post.text + (post.url ? `\n\nSource: ${post.url}` : "");
+    setBrainMsg("Saving to brain…");
+    try {
+      const res = await api.brainSave(title, body, { source: post.platform, author: post.author || "", likes: post.like_count });
+      setBrainMsg(res.indexed ? `Saved to brain ✓ (indexed)` : `Saved to brain ✓ (${res.note || "file only"})`);
+    } catch (e) {
+      setBrainMsg("Brain save failed: " + e.message);
+    }
+  }
+
+  async function removeQuery(id) {
+    try {
+      await api.socialDelete(id);
+      setQueries((cur) => cur.filter((q) => q.id !== id));
+    } catch (e) {
+      setErr(e.message);
+    }
+  }
+
   return (
     <div className="studio">
       <h2>Social Listen</h2>
@@ -513,6 +568,7 @@ function SocialListen({ user, setError, onRepurpose }) {
         {busy ? "Listening…" : "Listen"}
       </button>
       {err && <div className="error">{err}</div>}
+      {brainMsg && <div className="error" style={{ color: "#7ee787" }}>{brainMsg}</div>}
       {posts.length > 0 && (
         <div className="result">
           <h3>Posts by engagement ({posts.length})</h3>
@@ -525,11 +581,12 @@ function SocialListen({ user, setError, onRepurpose }) {
                 <p className="muted">
                   ♥ {post.like_count} · ↻ {post.repost_count} · 💬 {post.reply_count}
                 </p>
-                <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   {post.url && (
                     <a className="link" href={post.url} target="_blank" rel="noreferrer">View ↗</a>
                   )}
                   <button className="link" onClick={() => repurpose(post)}>→ Repurpose</button>
+                  <button className="link" onClick={() => savePost(post)}>🧠 Save to Brain</button>
                 </div>
               </div>
             ))}
@@ -542,7 +599,10 @@ function SocialListen({ user, setError, onRepurpose }) {
           <div className="grid">
             {queries.map((q) => (
               <div className="card" key={q.id}>
-                <h3>{q.topic}</h3>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <h3>{q.topic}</h3>
+                  <button className="link" onClick={() => removeQuery(q.id)} title="Delete this listen">✕</button>
+                </div>
                 <p className="muted">{q.platforms} · {q.created_at}</p>
               </div>
             ))}

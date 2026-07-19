@@ -87,14 +87,17 @@ def listen_x(topic: str, limit: int = 20) -> list[dict]:
     try:
         page = browser.new_page()
         url = f"https://x.com/search?q={_quote(topic)}&f=top"
-        html = _wait_and_scrape(page, url)
+        html = _wait_and_scrape(page, url, scroll=8)
         soup = BeautifulSoup(html, "html.parser")
         posts = []
-        for article in soup.find_all("article")[: limit * 2]:
+        for article in soup.find_all("article"):
             text_el = article.find("div", {"data-testid": "tweetText"})
             if not text_el:
+                # Skip shells (promoted/empty/quoted shells) that have no body text.
                 continue
             text = text_el.get_text(" ", strip=True)
+            if not text:
+                continue
             author = ""
             user_link = article.find("a", href=re.compile(r"^/[^/]+$"))
             if user_link:
@@ -129,30 +132,42 @@ def listen_x(topic: str, limit: int = 20) -> list[dict]:
 
 
 def listen_linkedin(topic: str, limit: int = 20) -> list[dict]:
-    """Scrape top LinkedIn posts. Returns normalized posts.
+    """Scrape top LinkedIn posts for a topic. Returns normalized posts.
 
-    LinkedIn hides reach/impressions (author-only); we capture likes/reactions at best.
-    The search-results page lazy-loads empty under headless, so we scrape the FEED
-    (already populated) and filter by topic keywords in the post text. Reaction counts
-    appear as "N reactions" strings; we climb to the enclosing post card for text.
+    We use LinkedIn's **search results / content** page (topic-scoped) rather than the
+    home feed: the feed is the user's contacts' activity (e.g. "<You> liked this…") which
+    is not about the enquiry, so it produced only notification/contact noise. The search
+    page returns real posts that mention the topic. LinkedIn hides reach/impressions
+    (author-only); we capture likes/reactions. Reaction counts appear as "N reactions"
+    strings; we climb to the enclosing post card for the body + author.
     """
     from bs4 import BeautifulSoup
+    from urllib.parse import quote_plus
 
     browser = _build_browser()
     try:
         page = browser.new_page()
-        # Feed is reliably rendered; search results are not under stealth headless.
-        html = _wait_and_scrape(page, "https://www.linkedin.com/feed/")
+        url = f"https://www.linkedin.com/search/results/content/?keywords={quote_plus(topic)}"
+        html = _wait_and_scrape(page, url, scroll=8)
         soup = BeautifulSoup(html, "html.parser")
         posts = []
-        seen_texts = set()
-        topic_l = topic.lower()
-        # Anchor on reaction-count strings, then climb to the post card.
+        seen = set()
+        # Drop notification / contact / "people you may know" cards (defensive — search
+        # rarely returns these, but the feed did, so keep the guard).
+        _NOISE = re.compile(
+            r"liked (your|this)|reacted to (your|this)|commented on (your|this)|"
+            r"reposted (your|this)|mentioned you|viewed your|followed you|"
+            r"new notification|you have [0-9,]+ new|people you may know|"
+            r"you might like|celebrated|shared a milestone|is hiring|"
+            r"see who's hiring|turn on notifications|invited you|endorsed you|"
+            r"wants to connect|sent you a (message|connection)|pending requests",
+            re.I,
+        )
         for el in soup.find_all(string=re.compile(r"^[0-9,]+[KMBkmb]?\s+reactions?$")):
             like = _parse_count(el.strip().split()[0])
             node = el.parent
             card = None
-            for _ in range(10):
+            for _ in range(12):
                 if node is None:
                     break
                 txt = node.get_text(" ", strip=True)
@@ -162,17 +177,19 @@ def listen_linkedin(topic: str, limit: int = 20) -> list[dict]:
                 node = node.parent
             if not card:
                 continue
-            # Drop "Feed post" header noise and promoted/suggested cards.
+            # Drop the "Feed post" header LinkedIn prepends and any promoted/suggested cards.
             card = re.sub(r"^Feed post\s*", "", card).strip()
             if "Promoted" in card[:60] or "Suggested" in card[:60]:
                 continue
-            if card in seen_texts:
+            if _NOISE.search(card):
                 continue
-            seen_texts.add(card)
-            author_el = node.find("a", href=re.compile(r"/in/")) if node else None
+            if card in seen:
+                continue
+            seen.add(card)
+            # Author: the in-card /in/ link's visible text (up to "•"); else slug-derived.
             author = ""
+            author_el = node.find("a", href=re.compile(r"/in/")) if node else None
             if author_el is not None:
-                # Prefer the link's visible text up to "•"; else derive from the /in/ slug.
                 link_text = author_el.get_text(" ", strip=True)
                 if link_text and "•" in link_text:
                     author = link_text.split("•")[0].strip()
@@ -182,22 +199,14 @@ def listen_linkedin(topic: str, limit: int = 20) -> list[dict]:
                     slug = author_el.get("href", "").rstrip("/").split("/")[-1]
                     author = slug.replace("-", " ").title() if slug else ""
             if not author:
-                # Fallback: feed card text often starts with "<Author> • <time>".
                 head = card.split("•")[0].strip()
                 author = head.split("  ")[0][:60] if head else ""
-            # Topic match is a SOFT preference (LinkedIn headless feed isn't topic-scoped):
-            # keep topic hits first, but always keep top-reaction posts as a fallback.
-            is_match = topic_l in card.lower()
             posts.append(_normalize_post({
                 "author": author, "text": card,
                 "like_count": like, "repost_count": 0,
                 "reply_count": 0, "url": "",
-                "_match": is_match,
             }))
-        # Prefer topic matches; if too few, top up with highest-reaction posts.
-        matches = sorted([p for p in posts if p.pop("_match", False)], key=lambda x: x["like_count"], reverse=True)
-        others = sorted([p for p in posts if not p.pop("_match", False)], key=lambda x: x["like_count"], reverse=True)
-        ranked = matches + others
+        ranked = sorted(posts, key=lambda x: x["like_count"], reverse=True)
         return ranked[:limit]
     finally:
         browser.close()

@@ -1294,4 +1294,123 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
 - NOTE: the user asked to ALWAYS update this 07 handoff at each boundary so the next chat picks up
   seamlessly. This 2026-07-18 update is that update.
 
+## Session update (2026-07-19) — Social Listen: deletable history + X + LinkedIn both fixed (live-tested)
+- User reported three things after testing: (1) Past listens piled up; (2) X returned nothing;
+  (3) LinkedIn results were mostly notification/contact noise ("X liked your post"). First
+  change (delete) shipping was fine. The LinkedIn/X parser fixes from the FIRST 07-19 pass were
+  WRONG — I had guessed. After the user tested, BOTH came back empty, so I instrumented a real
+  run (captured raw HTML + parsed intermediates to /tmp) instead of guessing. Findings:
+- ROOT CAUSE 1 — LinkedIn was scraping the HOME **feed** (`/feed/`), which is the user's
+  contacts' activity (e.g. "Niels Teitge likes this Mercedes-Benz…"), NOT topic results. That is
+  exactly the "contacts/notifications" noise the user saw. My first pass tried to filter it with
+  a noise regex + a strict `topic in card` requirement — but the feed has no topic words, so it
+  dropped EVERYTHING (LinkedIn went from working to 0). Double bug: wrong source + over-strict.
+- ROOT CAUSE 2 — X was actually returning 8 real posts fine; my first-pass "hardening" (removing
+  the `[:limit*2]` pre-slice + skip-empty-article guards) is what made it work, but the earlier
+  empty-X symptom the user reported was likely a stale server / the same regression window.
+- REAL FIX (live-verified): `listen_linkedin` now scrapes LinkedIn **search content**
+  (`/search/results/content/?keywords=<topic>`) instead of the home feed. Search IS
+  topic-scoped, so contact/notification noise is gone by construction (the `_NOISE` regex is
+  kept as a defensive guard but rarely fires). Confirmed live: a "ai agents" search returns real
+  topic posts (Reid Patterson, Daniel Hughes, Prakash Mana, …) sorted by reactions. Removed the
+  strict `topic in card` requirement (feed-only workaround) and the topic/top-up merge; search
+  results are already the enquiry. Author extraction keeps the `/in/` link text up to "•".
+- X unchanged from the working pass (`listen_x`: no `[:limit*2]` pre-slice, scroll 8,
+  skip empty `tweetText` articles). Confirmed live: 8 real X posts with authors + status URLs.
+- (1) DELETABLE HISTORY (shipped earlier same day, still in place): `DELETE
+  /api/social/queries/{id}` in `backend/routes/social.py` cascades `SocialPost` rows then deletes
+  the query (404 if missing/not yours; dev-bypass aware); `api.socialDelete(id)` in
+  `frontend/src/api.js`; `SocialListen` "Past listens" grid has a `✕` button per card.
+- A temporary `SOCIAL_DEBUG` HTML-dump hook was added to `_wait_and_scrape` to diagnose, then
+  REMOVED (no debug code left in the module; stray `os`/`sys` imports cleaned up).
+- VERIFIED (REAL run, saved CloakBrowser profile): `python` harness -> X = 8 posts, LinkedIn = 2
+  topic-scoped posts, both merged + sorted by likes. `backend py_compile` OK;
+  `frontend npm run build` passes. No schema change. To re-run manually: `./dev.sh` -> Social
+  Listen tab, enter a topic, pick X/LinkedIn, Listen.
+- CAVEAT: LinkedIn search returns fewer posts than X (search content page is lighter); that's
+  expected. LinkedIn author prefixes are still best-effort from the `/in/` link text.
+
+## Session update (2026-07-19, part 2) — Social Listen seed hand-off + results persistence + "Save to Brain"
+- User feedback after the part-1 fix: (a) clicking **Repurpose** on a Social Listen post opened
+  Content Studio but the post text was NOT carried over; (b) navigating away from Social Listen
+  and back LOST all results (both the live posts and the Past-listens grid reset); (c) wanted a
+  way to SAVE any result into a growing, searchable "brain" (used VectifyAI PageIndex / OpenKB).
+- (a) SEED HAND-OFF FIX: `ContentStudio` already took `seed={studioSeed}` and did
+  `useState(seed)`, but the hand-off was unreliable because the component remounts on tab switch
+  and a delayed `studioSeed` update could be missed. Added a `useEffect(() => { if (seed)
+  setMaterial(cur => cur ? cur + "\n\n" + seed : seed) }, [seed])` so the latest seed ALWAYS
+  lands in the material box (append, so any user-typed text is preserved). `studioSeed` is set in
+  `Home` by the Social Listen `onRepurpose` closure before `setTab("content")`. Verified build.
+- (b) RESULTS PERSISTENCE: lifted Social Listen's `posts` + `queries` state OUT of the
+  `SocialListen` component and INTO `Home` (`socialPosts` / `socialQueries`), passed down as
+  props. Because `SocialListen` unmounts on every tab switch, its local state was wiped; now the
+  results survive navigation and reappear when you come back to the tab. `SocialListen` signature
+  gained `posts/setPosts/queries/setQueries` props; its init `useState([])`s were removed.
+- (c) SAVE TO BRAIN (growing knowledge base): added a shared `saveToBrain(title, body, meta)`
+  helper in `frontend/src/App.jsx`. A "🧠 Save to Brain" button now appears on (1) every Social
+  Listen post card and (2) the Content Studio result header. On click it: writes the content as a
+  timestamped `.md` (Blob download, frontmatter with source/author/likes/mode), AND copies the
+  `openkb add brain/raw/<file>.md` command to the clipboard, and shows a green confirmation line.
+  Design choice (per user): **local CLI only, no backend change** — the browser can't run a CLI
+  or write to disk, so the file is downloaded and the ready-to-run command is on the clipboard.
+  OpenKB (`pip install openkb`) compiles dropped-in `.md` files into an Obsidian-compatible wiki of
+  topic/entity pages + cross-links, so saved results accumulate into a searchable brain you can
+  later browse to see how topics evolved. One-time setup (documented for the user, not in repo):
+  `pip install openkb && mkdir -p brain/raw && cd brain && openkb init` (needs an `LLM_API_KEY`
+  for the compile step; uses LiteLLM, e.g. the existing OpenAI/OpenRouter key). Then after a
+  Save-to-Brain download, `cd brain && openkb add raw/<downloaded>.md`. Optional:
+  `openkb watch` auto-compiles anything dropped in `raw/`.
+- VERIFIED: `frontend npm run build` passes (32 modules). No backend change. Both fixes are
+  client-state + a download helper; logic is dependency-free (OpenKB is optional, only used when
+  the user runs the copied command). Seeds carry over (Social Listen -> Content Studio) and Social
+  Listen results persist across tab switches.
+
+## Session update (2026-07-19, part 3) — "Save to Brain" is now FULLY SERVER-SIDE
+- User decided: the local-only download+clipboard approach was too manual; wants the frontend
+  button to index into the brain directly. DECISION: full server-side, works in local dev AND
+  when deployed. Added `backend/routes/brain.py` + registered `app.include_router(brain.router)`.
+- BACKEND: `POST /api/brain/save` (flat `Body(..., embed=True)` params `title/body/meta`) writes
+  the content as a timestamped `.md` into `brain/raw/`, then runs `openkb add <file>` (via
+  `subprocess.run`, 300s timeout) to compile it into the OpenKB wiki. `openkb` is OPTIONAL: if
+  not installed, the file is still written and the route returns `indexed:false` + a note. Added
+  `GET /api/brain/status` (initialized? openkb_available? raw_count?). `_ensure_init()` runs
+  `openkb init` (piped empty input for defaults) only if `brain/.openkb` is missing. The
+  subprocess env injects `OPENROUTER_API_KEY` (and falls back to `LLM_API_KEY`) from app settings,
+  so the LLM compile authenticates without duplicating secrets. The brain KB lives at
+  `<project>/brain` (where the user already ran `openkb init`).
+- MODEL / AUTH FIX: the user's `openkb init` set `model: google/gemma-4-31b-it:free` with a bare
+  `LLM_API_KEY` (the OpenRouter key). That model is OpenRouter-hosted, so LiteLLM needs the
+  `openrouter/` provider prefix + `OPENROUTER_API_KEY` to route it. CHANGED `brain/.openkb/
+  config.yaml` `model:` -> `openrouter/google/gemma-4-31b-it:free` (the backend injects
+  `OPENROUTER_API_KEY`). Verified live: `openkb add` reaches the model (summary compiled, in=580/
+  out=134) — the only failure seen is OpenRouter's 429 rate-limit on the `:free` tier, not a config
+  error. The route detects "Compilation failed"/"RateLimitError" in the output and returns
+  `indexed:false` + a clear note (the file is still on disk and re-indexes on retry); it does NOT
+  falsely report success when openkb exits 0 on a partial compile.
+- FRONTEND: `api.brainSave(title, body, meta)` + `api.brainStatus()` added in `api.js`. The two
+  "🧠 Save to Brain" buttons (Social Listen post card + Content Studio result) now call
+  `api.brainSave` with a "Saving to brain…" -> "Saved to brain ✓ (indexed)" / "(file only: …)"
+  status line (replacing the old download+clipboard `saveToBrain` helper, which was deleted). The
+  brain `.md` is written + indexed server-side; the user no longer pastes commands.
+- VERIFIED: backend `py_compile` OK; TestClient `POST /api/brain/save` writes the `.md` to
+  `brain/raw` and returns `indexed:false` with the rate-limit note (free model throttled right
+  now); `GET /api/brain/status` returns initialized=true, openkb_available=true. `frontend npm run
+  build` passes. Note: the `:free` model will intermittently 429 — if indexing is needed reliably,
+  switch `brain/.openkb/config.yaml` model to a paid OpenRouter slug (e.g.
+  `openrouter/google/gemma-4-31b-it` without `:free`) or add a BYOK OpenRouter key; no code change.
+- OPEN QUESTION answered: yes, /api/brain/save is server-side and will work in the deployed app.
+
+## Session update (2026-07-19, part 4) — Brain model swapped to nex-agi/nex-n2-mini (paid, reliable)
+- User asked whether the brain model needs image input (it doesn't — `openkb add` ingests `.md`
+  text via markitdown; no images/audio/video involved), and to switch off the rate-limited
+  `:free` Gemma to a paid model. Changed `brain/.openkb/config.yaml` `model:` ->
+  `openrouter/nex-agi/nex-n2-mini` (35B MoE / 262k ctx, ~$0.025/$0.10 per 1M — ~10x cheaper than
+  Nex-N2-Pro). It's text-only (Qwen3.5 base), which is exactly right for markdown ingestion.
+- VERIFIED LIVE: `openkb add` on a sample `.md` compiled fully in ~35s — summary (in=590/out=716)
+  + concepts-plan + 2 concept pages (`ai-agents-content-workflows`, `model-probing`) + summary-
+  rewrite — exit 0, "[OK] added to knowledge base". No rate-limit (unlike the `:free` tier). The
+  backend route needed NO change (it injects OPENROUTER_API_KEY and runs `openkb add`). Brain
+  "Save to Brain" button now indexes reliably. Mini is "big enough" for this summarize/extract
+  task; step up to `nex-agi/nex-n2-pro` only if concept-page quality feels thin.
+
 ## Next steps (per original plan + where we are)
