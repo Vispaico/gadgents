@@ -64,6 +64,8 @@ export const api = {
   brainSave: (title, body, meta = {}) =>
     req("POST", "/brain/save", { title, body, meta }),
   brainStatus: () => req("GET", "/brain/status"),
+  brainQuery: (q) => req("POST", "/brain/query", { q }),
+  brainDocs: () => req("GET", "/brain/docs"),
   leadIcpChat: (message, history) =>
     req("POST", "/leadfinder/icp-chat", { message, history }),
   leadRun: (icp) => req("POST", "/leadfinder/run", { icp }),

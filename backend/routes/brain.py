@@ -144,6 +144,61 @@ def brain_status():
     }
 
 
+@router.post("/query")
+def brain_query(q: str = Body(..., embed=True)):
+    """Ask the brain a question. Runs `openkb query` over the compiled wiki and returns the
+    grounded answer plus any [[wikilink]] sources the model cited."""
+    if not q.strip():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="query required")
+    if not _have_openkb():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="openkb is not installed — cannot query the brain.",
+        )
+    env = _brain_env()
+    try:
+        proc = subprocess.run(
+            ["openkb", "query", q],
+            cwd=str(_BRAIN_DIR),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="Brain query timed out (>5min).")
+    if proc.returncode != 0:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"openkb query failed: {proc.stderr[:500] or proc.stdout[:500]}",
+        )
+    answer = (proc.stdout or "").strip()
+    # Extract [[wikilink]] citations the model may have emitted.
+    import re
+    sources = sorted(set(re.findall(r"\[\[([^\]]+)\]\]", answer)))
+    return {"query": q, "answer": answer, "sources": sources}
+
+
+@router.get("/docs")
+def brain_docs():
+    """List what's currently in the brain (indexed documents + concept pages)."""
+    if not _have_openkb():
+        return {"documents": [], "concepts": [], "available": False}
+    env = _brain_env()
+    proc = subprocess.run(
+        ["openkb", "list"],
+        cwd=str(_BRAIN_DIR),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    return {
+        "available": True,
+        "raw": proc.stdout or proc.stderr or "",
+    }
+
+
 def _have_openkb() -> bool:
     from shutil import which
     return which("openkb") is not None

@@ -142,6 +142,7 @@ function Home({ user, setError, onBought, onLogout }) {
           <button className={tab === "social" ? "active" : ""} onClick={() => setTab("social")}>Social Listen</button>
           <button className={tab === "leads" ? "active" : ""} onClick={() => setTab("leads")}>Lead Finder</button>
           <button className={tab === "wan" ? "active" : ""} onClick={() => setTab("wan")}>Wan Video</button>
+          <button className={tab === "brain" ? "active" : ""} onClick={() => setTab("brain")}>Brain</button>
           <button className={tab === "billing" ? "active" : ""} onClick={() => setTab("billing")}>Billing</button>
           <button className="link" onClick={onLogout}>Log out</button>
         </nav>
@@ -168,6 +169,7 @@ function Home({ user, setError, onBought, onLogout }) {
           />
         )}
         {tab === "wan" && <WanVideo user={user} setError={setError} seed={wanSeed} />}
+        {tab === "brain" && <BrainSearch setError={setError} />}
         {tab === "billing" && <Billing onBought={onBought} />}
       </main>
     </div>
@@ -954,6 +956,68 @@ function WanVideo({ user, setError, seed = "" }) {
               </div>
             ))}
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BrainSearch({ setError }) {
+  const [q, setQ] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [sources, setSources] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  async function ask() {
+    if (!q.trim()) return;
+    setBusy(true);
+    setErr("");
+    setAnswer("");
+    setSources([]);
+    try {
+      const res = await api.brainQuery(q);
+      setAnswer(res.answer || "(no answer)");
+      setSources(res.sources || []);
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="studio">
+      <h2>Brain</h2>
+      <p className="muted">
+        Search your growing knowledge base. Every "Save to Brain" result is compiled into a
+        wiki here; ask it how topics evolved, what you've collected, or pull a synthesis.
+      </p>
+      <textarea
+        className="big"
+        value={q}
+        placeholder="Ask the brain… (e.g. 'How has the AI agents topic evolved?' or 'What have I saved about content workflows?')"
+        onChange={(e) => setQ(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && (e.preventDefault(), ask())}
+      />
+      <button disabled={busy || !q.trim()} onClick={ask}>
+        {busy ? "Thinking…" : "Ask the brain"}
+      </button>
+      {err && <div className="error">{err}</div>}
+      {answer && (
+        <div className="result">
+          <h3>Answer</h3>
+          <pre style={{ whiteSpace: "pre-wrap" }}>{answer}</pre>
+          {sources.length > 0 && (
+            <>
+              <h3>Sources</h3>
+              <div className="chips">
+                {sources.map((s, i) => (
+                  <span key={i} className="chip">{s}</span>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

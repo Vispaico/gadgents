@@ -1413,4 +1413,27 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
   "Save to Brain" button now indexes reliably. Mini is "big enough" for this summarize/extract
   task; step up to `nex-agi/nex-n2-pro` only if concept-page quality feels thin.
 
+## Session update (2026-07-19, part 5) — Tapping into the brain: "Brain" search tab
+- User: "how do we search the brain?" Decision: full in-app search (not just the openkb CLI).
+  Added a **Brain** nav tab + backend query route so you can ask the growing knowledge base from
+  the same UI (works in dev + deployed).
+- BACKEND (`backend/routes/brain.py`): added `POST /api/brain/query` (flat `Body q`) — runs
+  `openkb query "<q>"` (subprocess, 300s timeout, OPENROUTER_API_KEY injected), returns
+  `{query, answer, sources}` where `sources` are any `[[wikilink]]` citations in the answer
+  (best-effort; openkb returns plain markdown and often omits explicit links). 503 if openkb
+  missing, 504 on timeout, 502 on openkb failure (with the error text). Added `GET /api/brain/docs`
+  (thin: returns `openkb list` raw text + available flag) for future "what's in the brain" UI.
+- FRONTEND: `api.brainQuery(q)` + `api.brainDocs()` in `api.js`; new **Brain** nav button in
+  `Home`; new `BrainSearch` component — textarea + "Ask the brain" button, renders the answer
+  (`white-space: pre-wrap`) + a chips row of cited sources. Enter (no shift) submits.
+- VERIFIED: backend `py_compile` OK; TestClient `POST /api/brain/query` returned a grounded answer
+  over the (then-populated) wiki; `frontend npm run build` passes. Also cleaned the earlier
+  `_probe_nex.md` test doc out of the brain via `openkb remove` so the KB starts empty for the
+  user ("No documents indexed yet"). An empty brain query hits openkb and returns its "no docs"
+  style answer (handled gracefully).
+- HOW TO USE: Save results via the 🧠 buttons (part 3) -> they compile into the wiki -> open the
+  Brain tab and ask "how has the <topic> conversation evolved?" to surface synthesis across saved
+  posts. For multi-turn drilling, the `openkb chat` CLI / `openk-api` web workbench still exist
+  outside the app.
+
 ## Next steps (per original plan + where we are)
