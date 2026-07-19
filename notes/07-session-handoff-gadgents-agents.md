@@ -1459,4 +1459,19 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
   and LinkedIn view-url are all client-only; no backend change. (Brain save confirmed working by
   the user: "Saved to brain ✓ (indexed)".)
 
+## Session update (2026-07-19, part 7) — "Save to Brain" is per-card (clarity fix)
+- User observed: clicking "Save to Brain" on a card seemed to save ALL search results, not just
+  the chosen one. INVESTIGATED: the backend `POST /api/brain/save` writes exactly ONE `.md` per
+  call (proven: TestClient save -> raw/ file count delta = +1), and the frontend `savePost(post)`
+  is bound per-card (`onClick={() => savePost(post)}`) — there is NO "save all" loop. What the
+  user actually saw: OpenKB recompiles the whole `brain/raw/` folder on every `openkb add`, so the
+  Brain tab/wiki accumulates every post ever saved (across searches/sessions), which looked like
+  one click saved them all. The per-click save was always correct.
+- CLARITY FIX (frontend, no backend change): `SocialListen` now tracks `savedIds` (the indices of
+  cards saved this session). The clicked card's button turns into a disabled "✓ Saved" and the
+  status line names the exact card ("Saved card N to brain ✓"), so it's unambiguous which single
+  card was saved. Other cards stay clickable. This makes the per-post behavior visible instead of
+  inferring it from the (accumulating) Brain tab.
+- VERIFIED: `frontend npm run build` passes (32 modules). Backend unchanged (confirmed per-post).
+
 ## Next steps (per original plan + where we are)

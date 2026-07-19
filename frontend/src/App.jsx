@@ -493,6 +493,9 @@ function SocialListen({ user, setError, onRepurpose, posts, setPosts, queries, s
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [brainMsg, setBrainMsg] = useState("");
+  // Track which specific cards were saved, so the UI shows per-card "✓ saved"
+  // (the brain accumulates everything you save, but each click saves ONLY this card).
+  const [savedIds, setSavedIds] = useState([]);
 
   function toggle(p) {
     setPlatforms((cur) => (cur.includes(p) ? cur.filter((x) => x !== p) : [...cur, p]));
@@ -534,13 +537,14 @@ function SocialListen({ user, setError, onRepurpose, posts, setPosts, queries, s
     onRepurpose(header + post.text);
   }
 
-  async function savePost(post) {
+  async function savePost(post, idx) {
     const title = `${post.platform} post${post.author ? " by " + post.author : ""}`;
     const body = post.text + (post.url ? `\n\nSource: ${post.url}` : "");
     setBrainMsg("Saving to brain…");
     try {
       const res = await api.brainSave(title, body, { source: post.platform, author: post.author || "", likes: post.like_count });
-      setBrainMsg(res.indexed ? `Saved to brain ✓ (indexed)` : `Saved to brain ✓ (${res.note || "file only"})`);
+      setSavedIds((cur) => (cur.includes(idx) ? cur : [...cur, idx]));
+      setBrainMsg(res.indexed ? `Saved card ${idx + 1} to brain ✓ (indexed)` : `Saved card ${idx + 1} to brain ✓ (${res.note || "file only"})`);
     } catch (e) {
       setBrainMsg("Brain save failed: " + e.message);
     }
@@ -609,7 +613,9 @@ function SocialListen({ user, setError, onRepurpose, posts, setPosts, queries, s
                     <a className="link" href={viewUrl} target="_blank" rel="noreferrer">View ↗</a>
                   )}
                   <button className="link" onClick={() => repurpose(post)}>→ Repurpose</button>
-                  <button className="link" onClick={() => savePost(post)}>🧠 Save to Brain</button>
+                  <button className="link" onClick={() => savePost(post, i)} disabled={savedIds.includes(i)}>
+                    {savedIds.includes(i) ? "✓ Saved" : "🧠 Save to Brain"}
+                  </button>
                 </div>
               </div>
               );
