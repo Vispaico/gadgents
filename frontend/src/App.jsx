@@ -126,9 +126,20 @@ function Home({ user, setError, onBought, onLogout }) {
   const [wanSeed, setWanSeed] = useState("");  // concept passed from Content Studio -> Wan tab
   const [studioSeed, setStudioSeed] = useState("");  // post text passed from Social Listen -> Content Studio
   // Lift Social Listen results into Home so they survive tab switches (the component
-  // unmounts on navigation, so local state was being lost every time).
-  const [socialPosts, setSocialPosts] = useState([]);
-  const [socialQueries, setSocialQueries] = useState([]);
+  // unmounts on navigation, so local state was being lost every time). Also mirror to
+  // sessionStorage so a full page reload keeps the last search results too.
+  const [socialPosts, setSocialPosts] = useState(() => {
+    try { return JSON.parse(sessionStorage.getItem("socialPosts") || "[]"); } catch { return []; }
+  });
+  const [socialQueries, setSocialQueries] = useState(() => {
+    try { return JSON.parse(sessionStorage.getItem("socialQueries") || "[]"); } catch { return []; }
+  });
+  useEffect(() => {
+    try { sessionStorage.setItem("socialPosts", JSON.stringify(socialPosts)); } catch {}
+  }, [socialPosts]);
+  useEffect(() => {
+    try { sessionStorage.setItem("socialQueries", JSON.stringify(socialQueries)); } catch {}
+  }, [socialQueries]);
   return (
     <div className="app">
       <header>
@@ -153,6 +164,7 @@ function Home({ user, setError, onBought, onLogout }) {
           <ContentStudio
             user={user}
             setError={setError}
+            seed={studioSeed}
             onSendToWan={(prompts) => { setWanSeed(prompts); setTab("wan"); }}
           />
         )}
@@ -277,10 +289,10 @@ const CONTENT_OUTPUTS = [
 ];
 
 function ContentStudio({ user, setError, onSendToWan, seed = "" }) {
-  const [material, setMaterial] = useState(seed);
+  const [material, setMaterial] = useState("");
   // Keep the editor in sync with a hand-off seed (from Social Listen "Repurpose").
-  // Without this, switching tabs remounts the component and a delayed seed update
-  // could be missed; the effect guarantees the latest seed always lands in the box.
+  // The box starts empty and the effect populates it when a seed arrives, so the
+  // latest repurpose always lands (and isn't doubled by the initial useState value).
   useEffect(() => {
     if (seed) setMaterial((cur) => (cur ? cur + "\n\n" + seed : seed));
   }, [seed]);
@@ -575,7 +587,16 @@ function SocialListen({ user, setError, onRepurpose, posts, setPosts, queries, s
         <div className="result">
           <h3>Posts by engagement ({posts.length})</h3>
           <div className="grid">
-            {posts.map((post, i) => (
+            {posts.map((post, i) => {
+              // LinkedIn search-results have no per-post URL; link to a search for the
+              // post text so "View ↗" always opens the original source in a new tab.
+              const viewUrl = post.url || (
+                post.platform === "linkedin"
+                  ? "https://www.linkedin.com/search/results/content/?keywords=" +
+                    encodeURIComponent(post.text.slice(0, 120))
+                  : ""
+              );
+              return (
               <div className="card" key={i}>
                 <span className="badge">{post.platform}</span>
                 {post.author && <span className="muted"> · {post.author}</span>}
@@ -584,14 +605,15 @@ function SocialListen({ user, setError, onRepurpose, posts, setPosts, queries, s
                   ♥ {post.like_count} · ↻ {post.repost_count} · 💬 {post.reply_count}
                 </p>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  {post.url && (
-                    <a className="link" href={post.url} target="_blank" rel="noreferrer">View ↗</a>
+                  {viewUrl && (
+                    <a className="link" href={viewUrl} target="_blank" rel="noreferrer">View ↗</a>
                   )}
                   <button className="link" onClick={() => repurpose(post)}>→ Repurpose</button>
                   <button className="link" onClick={() => savePost(post)}>🧠 Save to Brain</button>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

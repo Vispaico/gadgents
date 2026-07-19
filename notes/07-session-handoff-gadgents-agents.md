@@ -1436,4 +1436,27 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
   posts. For multi-turn drilling, the `openkb chat` CLI / `openk-api` web workbench still exist
   outside the app.
 
+## Session update (2026-07-19, part 6) — FIX: Repurpose seed + Social Listen persistence + LinkedIn "View ↗"
+- User re-tested and two of the part-2 fixes were STILL broken in the running app: (1) clicking
+  **Repurpose** still carried nothing into Content Studio; (2) returning to Social Listen lost the
+  search results (had to search again). Plus (3) the LinkedIn cards had no "View ↗" link (only X
+  had one, because LinkedIn search results have no per-post URL).
+- ROOT CAUSE (1) — the part-2 edit added a `useEffect` to sync `seed` into `material` but FORGOT
+  to pass `seed={studioSeed}` to `<ContentStudio>` in the `Home` render. So `studioSeed` was set
+  on Repurpose but never reached the component (it defaulted to ""). FIX: added `seed={studioSeed}`
+  to the ContentStudio render AND changed its `useState(seed)` -> `useState("")` so the effect is
+  the sole populator (avoids double-seeding the text on mount). Now Repurpose text lands reliably.
+- ROOT CAUSE (2) — the part-2 state-lifting (socialPosts/socialQueries in Home) WAS correct for
+  tab switches, but to be bulletproof against a full page reload too, added `sessionStorage`
+  hydration (lazy `useState(() => JSON.parse(sessionStorage...))`) + persist `useEffect`s in Home.
+  Now the last search results AND past-listens survive tab switches AND reloads. (If the user
+  still saw loss before, it was a stale dev build — the running server now has both fixes.)
+- FIX (3) — LinkedIn post cards now get a generated `viewUrl`: `post.url` if present, else for
+  LinkedIn a `https://www.linkedin.com/search/results/content/?keywords=<first 120 chars>` link,
+  so "View ↗" (already `target="_blank"`) appears on every card and opens the original source in
+  a new tab. X keeps its real status URL.
+- VERIFIED: `frontend npm run build` passes (32 modules). The seed-fix, sessionStorage persistence,
+  and LinkedIn view-url are all client-only; no backend change. (Brain save confirmed working by
+  the user: "Saved to brain ✓ (indexed)".)
+
 ## Next steps (per original plan + where we are)
