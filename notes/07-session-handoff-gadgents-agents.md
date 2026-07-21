@@ -1475,3 +1475,47 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
 - VERIFIED: `frontend npm run build` passes (32 modules). Backend unchanged (confirmed per-post).
 
 ## Next steps (per original plan + where we are)
+
+## Session update (2026-07-21) — Frontend UX shell overhaul (sidebar + Brain drawer + onboarding)
+- User wanted a product-grade UI. Agreed scope: **frontend-only** shell polish (no backend change
+  — streaming + multimodal composer deferred). Converted the flat top-nav into a workspace shell.
+- LAYOUT (`frontend/src/App.jsx`): `.app` (centered 960px column + `<header>` nav) is GONE, replaced
+  by a flex `.shell` = `.sidebar` (fixed 240px left) + `.workspace` (flex:1: `.topbar` + `.main`).
+  * **Sidebar**: brand, vertical `NAV_ITEMS` (Home/Bots/Content Studio/Social Listen/Lead Finder/
+    Wan Video/Billing) with active highlight, a 🧠 **Brain** nav item that opens the right drawer,
+    and a footer with the user chip + Log out. `ModeToggle` moved to the `.topbar` (right-aligned).
+  * **Brain is now a right-drawer**, not a tab: `BrainDrawer` slides in (transform + backdrop),
+    reuses the existing `BrainSearch` component; closes on backdrop click or `Escape`. Removed
+    "brain" from the tab set (the `tab` state never equals "brain" now).
+  * **Onboarding landing**: default `tab="home"` (was "bots") now renders `Onboarding` — a hero +
+    capability-card grid (one card per workspace) that navigates on click. This doubles as the
+    empty/zero-result state for a fresh session; each agent's own empty states are unchanged.
+  * **Responsive**: under 800px the sidebar becomes an off-canvas overlay toggled by a `.hamburger`
+    in the topbar (`shell.sidebar-open` class). All agent content goes full-width.
+- STATE preserved EXACTLY: `studioSeed` (Social Listen -> Content Studio), `wanSeed` (Content Studio
+  -> Wan Video), and the lifted `socialPosts`/`socialQueries` (+ sessionStorage) all still work.
+  `go(id)` closes the mobile sidebar on navigation. User/seeds passed to the same components.
+- `frontend/src/index.css`: extended theme tokens (--surface/--panel2/--hover/--border/--radius),
+  added `.shell/.sidebar/.nav/.nav-item/.workspace/.topbar/.hamburger/.drawer/.drawer-backdrop/
+  .onboarding/.cap-grid` styles + the 800px responsive breakpoint. Old `header`/`nav`/`tab active`
+  rules removed; `button:not(...)` guard keeps nav items + hamburger styled as transparent.
+- NO backend change. `api.js` untouched. All agent components (BotList/ContentStudio/SocialListen/
+  LeadFinder/WanVideo/Billing/BrainSearch) kept verbatim aside from render location.
+- VERIFIED: `npm run build` passes (32 modules, dist built). No stale `.app`/`<header>`/<brain tab>
+  references remain in JSX. Dev-bypass boots to the Onboarding landing; nav opens each panel; Brain
+  drawer opens/closes; mode toggle still sends `?mode=`; social->content + content->wan seeds intact.
+- NOTE for next chat: the "Bots · Content Studio · Social Listen · Lead Finder · Wan Video · Brain ·
+  Billing" nav described in older handoff sections is now the sidebar list ABOVE the Brain drawer
+  trigger + a Home landing — the net set of workspaces is unchanged (Home added as landing).
+- DEFERRED (user chose "frontend shell only"): token-by-token streaming (needs SSE backend endpoints)
+  and the unified multimodal composer (text + drag-drop file/image/audio/video; needs upload
+  endpoints + preprocessing). Both are backend-bearing; revisit when ready.
+
+## Next steps (per original plan + where we are)
+- FRONTEND (this session, DONE): workspace sidebar + Brain right-drawer + onboarding + theming/
+  responsive shell. Streaming + multimodal composer deferred.
+- PER-AGENT TUNING still open: lead-finder audit (or-qwen37) / scoring (or-llama33) could be
+  stronger; wan-video Fusion panel is heavy for drafts; user hasn't tested Lead Finder / Wan outputs.
+- PRODUCTIONIZE (deferred): hosting; flip REQUIRE_LOGIN=true + ENABLE_PAYWALL=true; planner proactive
+  reminder LOOP + delivery channel; repurposer URL-ingestion; monthly token-budget cap.
+- WAN FORMAT PRESETS: populate `FORMAT_PRESETS` (ads/docs/short-film/etc.) when material supplied.

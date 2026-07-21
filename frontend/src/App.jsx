@@ -1,7 +1,18 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { api, getToken, setToken, getMode, setMode } from "./api.js";
 
 const ALL_PLATFORMS = ["Instagram", "TikTok", "LinkedIn", "X", "YouTube", "Facebook"];
+
+// Sidebar nav (Brain is a right-drawer, not a tab).
+const NAV_ITEMS = [
+  { id: "home", label: "Home", icon: "◆" },
+  { id: "bots", label: "Bots", icon: "🤖" },
+  { id: "content", label: "Content Studio", icon: "✍️" },
+  { id: "social", label: "Social Listen", icon: "📡" },
+  { id: "leads", label: "Lead Finder", icon: "🎯" },
+  { id: "wan", label: "Wan Video", icon: "🎬" },
+  { id: "billing", label: "Billing", icon: "💳" },
+];
 
 export function App() {
   const [view, setView] = useState(getToken() ? "home" : "auth");
@@ -122,7 +133,9 @@ function AuthScreen({ error, setError, onLogin, onRegister, busy }) {
 }
 
 function Home({ user, setError, onBought, onLogout }) {
-  const [tab, setTab] = useState("bots");
+  const [tab, setTab] = useState("home");
+  const [brainOpen, setBrainOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [wanSeed, setWanSeed] = useState("");  // concept passed from Content Studio -> Wan tab
   const [studioSeed, setStudioSeed] = useState("");  // post text passed from Social Listen -> Content Studio
   // Lift Social Listen results into Home so they survive tab switches (the component
@@ -140,50 +153,150 @@ function Home({ user, setError, onBought, onLogout }) {
   useEffect(() => {
     try { sessionStorage.setItem("socialQueries", JSON.stringify(socialQueries)); } catch {}
   }, [socialQueries]);
+
+  // Selecting a nav item also closes the mobile sidebar overlay.
+  function go(t) {
+    setTab(t);
+    setSidebarOpen(false);
+  }
+
   return (
-    <div className="app">
-      <header>
+    <div className={`shell ${sidebarOpen ? "sidebar-open" : ""}`}>
+      <Sidebar
+        tab={tab}
+        user={user}
+        onNavigate={go}
+        onOpenBrain={() => { setBrainOpen(true); setSidebarOpen(false); }}
+        onLogout={onLogout}
+      />
+      <div className="workspace">
+        <div className="topbar">
+          <button className="hamburger" onClick={() => setSidebarOpen((v) => !v)} aria-label="Menu">☰</button>
+          <span className="muted credits">credits: {user?.credits}</span>
+          <span className="muted">plan: {user?.plan}</span>
+          <ModeToggle />
+        </div>
+        <main className="main">
+          {tab === "home" && (
+            <Onboarding onOpen={go} />
+          )}
+          {tab === "bots" && <BotList user={user} />}
+          {tab === "content" && (
+            <ContentStudio
+              user={user}
+              setError={setError}
+              seed={studioSeed}
+              onSendToWan={(prompts) => { setWanSeed(prompts); go("wan"); }}
+            />
+          )}
+          {tab === "leads" && <LeadFinder user={user} setError={setError} />}
+          {tab === "social" && (
+            <SocialListen
+              user={user}
+              setError={setError}
+              posts={socialPosts}
+              setPosts={setSocialPosts}
+              queries={socialQueries}
+              setQueries={setSocialQueries}
+              onRepurpose={(text) => { setStudioSeed(text); go("content"); }}
+            />
+          )}
+          {tab === "wan" && <WanVideo user={user} setError={setError} seed={wanSeed} />}
+          {tab === "billing" && <Billing onBought={onBought} />}
+        </main>
+      </div>
+      <BrainDrawer open={brainOpen} onClose={() => setBrainOpen(false)} setError={setError} />
+    </div>
+  );
+}
+
+function Sidebar({ tab, user, onNavigate, onOpenBrain, onLogout }) {
+  return (
+    <aside className="sidebar">
+      <div className="brand">
         <strong>Gadgents</strong>
-        <span className="muted">credits: {user?.credits}</span>
-        <span className="muted">plan: {user?.plan}</span>
-        <ModeToggle />
-        <nav>
-          <button className={tab === "bots" ? "active" : ""} onClick={() => setTab("bots")}>Bots</button>
-          <button className={tab === "content" ? "active" : ""} onClick={() => setTab("content")}>Content Studio</button>
-          <button className={tab === "social" ? "active" : ""} onClick={() => setTab("social")}>Social Listen</button>
-          <button className={tab === "leads" ? "active" : ""} onClick={() => setTab("leads")}>Lead Finder</button>
-          <button className={tab === "wan" ? "active" : ""} onClick={() => setTab("wan")}>Wan Video</button>
-          <button className={tab === "brain" ? "active" : ""} onClick={() => setTab("brain")}>Brain</button>
-          <button className={tab === "billing" ? "active" : ""} onClick={() => setTab("billing")}>Billing</button>
-          <button className="link" onClick={onLogout}>Log out</button>
-        </nav>
-      </header>
-      <main>
-        {tab === "bots" && <BotList user={user} />}
-        {tab === "content" && (
-          <ContentStudio
-            user={user}
-            setError={setError}
-            seed={studioSeed}
-            onSendToWan={(prompts) => { setWanSeed(prompts); setTab("wan"); }}
-          />
-        )}
-        {tab === "leads" && <LeadFinder user={user} setError={setError} />}
-        {tab === "social" && (
-          <SocialListen
-            user={user}
-            setError={setError}
-            posts={socialPosts}
-            setPosts={setSocialPosts}
-            queries={socialQueries}
-            setQueries={setSocialQueries}
-            onRepurpose={(text) => { setStudioSeed(text); setTab("content"); }}
-          />
-        )}
-        {tab === "wan" && <WanVideo user={user} setError={setError} seed={wanSeed} />}
-        {tab === "brain" && <BrainSearch setError={setError} />}
-        {tab === "billing" && <Billing onBought={onBought} />}
-      </main>
+        <span className="muted">AI bots · pay per use</span>
+      </div>
+      <nav className="nav">
+        {NAV_ITEMS.map((it) => (
+          <button
+            key={it.id}
+            className={`nav-item ${tab === it.id ? "active" : ""}`}
+            onClick={() => onNavigate(it.id)}
+          >
+            <span className="nav-ico">{it.icon}</span>
+            <span>{it.label}</span>
+          </button>
+        ))}
+        <button className="nav-item brain" onClick={onOpenBrain}>
+          <span className="nav-ico">🧠</span>
+          <span>Brain</span>
+        </button>
+      </nav>
+      <div className="sidebar-foot">
+        <div className="user-chip">
+          <span className="avatar">{user?.email ? user.email[0].toUpperCase() : "👤"}</span>
+          <span className="muted">{user?.email || user?.plan || "guest"}</span>
+        </div>
+        <button className="nav-item" onClick={onLogout}>
+          <span className="nav-ico">↩</span>
+          <span>Log out</span>
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+function BrainDrawer({ open, onClose, setError }) {
+  // Close on Escape.
+  useEffect(() => {
+    if (!open) return;
+    function onKey(e) { if (e.key === "Escape") onClose(); }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+  return (
+    <>
+      <div className={`drawer-backdrop ${open ? "open" : ""}`} onClick={onClose} />
+      <aside className={`drawer ${open ? "open" : ""}`} aria-hidden={!open}>
+        <div className="drawer-head">
+          <strong>Brain</strong>
+          <button className="link" onClick={onClose}>✕</button>
+        </div>
+        <div className="drawer-body">
+          <BrainSearch setError={setError} />
+        </div>
+      </aside>
+    </>
+  );
+}
+
+function Onboarding({ onOpen }) {
+  // One capability card per workspace, doubling as empty-state navigation.
+  const cards = [
+    { id: "content", icon: "✍️", title: "Content Studio", desc: "Turn an article or idea into prompts, posts, or a multi-platform repurpose." },
+    { id: "social", icon: "📡", title: "Social Listen", desc: "Pull posts by topic from X / LinkedIn, sorted by engagement, and repurpose them." },
+    { id: "leads", icon: "🎯", title: "Lead Finder", desc: "Describe your ideal client; discover public-web leads with fit scores and angles." },
+    { id: "wan", icon: "🎬", title: "Wan Video", desc: "Turn a concept into a Wan2.2 storyboard of one-shot ~5s video clips." },
+    { id: "bots", icon: "🤖", title: "Bots", desc: "Chat with the prompt-engineer, coder, planner and other single-purpose agents." },
+    { id: "billing", icon: "💳", title: "Billing", desc: "Buy credit packs or a subscription plan." },
+  ];
+  return (
+    <div className="onboarding">
+      <h1>What do you want to build today?</h1>
+      <p className="muted">
+        Pick a workspace. Everything you create can be saved to the Brain and re-purposed across tools.
+      </p>
+      <div className="cap-grid">
+        {cards.map((c) => (
+          <div className="card click cap" key={c.id} onClick={() => onOpen(c.id)}>
+            <span className="cap-ico">{c.icon}</span>
+            <h3>{c.title}</h3>
+            <p className="muted">{c.desc}</p>
+          </div>
+        ))}
+      </div>
+      <p className="muted tip">Tip: send any Social Listen post or set of prompts straight into Content Studio or Wan Video from the result actions.</p>
     </div>
   );
 }
