@@ -11,6 +11,22 @@ class InsufficientCredits(Exception):
 
 
 def charge(session: Session, user: User, agent_id: str, credits: int, tokens_in: int, tokens_out: int) -> None:
+    # Per-user free access: bypass paywall for admin/family accounts regardless
+    # of the global ENABLE_PAYWALL flag. Usage is still recorded for observability.
+    if user is not None and user.free_access:
+        if session:
+            session.add(
+                Usage(
+                    user_id=user.id,
+                    agent_id=agent_id,
+                    credits_used=0,
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                )
+            )
+            session.commit()
+        return
+
     # Dev / preview mode: when the paywall is off, never deduct or block.
     if not _settings.enable_paywall:
         if session and user is not None:

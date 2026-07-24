@@ -10,6 +10,8 @@ class User(SQLModel, table=True):
     hashed_password: str
     credits: int = Field(default=0)  # remaining spendable credits
     plan: str = Field(default="free")  # free | hourly | monthly
+    role: str = Field(default="user")  # admin | user | family | dev
+    free_access: bool = Field(default=False)  # bypass paywall regardless of global flag
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     is_active: bool = Field(default=True)
 
@@ -184,6 +186,44 @@ def get_or_create_dev_user(session: Session) -> User:
     session.commit()
     session.refresh(dev)
     return dev
+
+
+def seed_family_accounts() -> None:
+    """Create the admin + family free-access accounts from .env (idempotent).
+
+    Called from init_db() on every startup. Skips already-registered emails so
+    the accounts are seeded exactly once and can be managed normally afterward.
+    If the env vars are blank, nothing happens — backward-compatible.
+    """
+    from backend.config import get_settings
+    from backend.auth import hash_password
+
+    settings = get_settings()
+    seeds = [
+        (settings.admin_email, settings.admin_password, "admin"),
+        (settings.family_email_1, settings.family_password_1, "family"),
+        (settings.family_email_2, settings.family_password_2, "family"),
+    ]
+    any_seeded = False
+    with Session(get_engine()) as session:
+        for email, password, role in seeds:
+            if not email:
+                continue
+            existing = session.exec(select(User).where(User.email == email)).first()
+            if existing:
+                continue
+            user = User(
+                email=email,
+                hashed_password=hash_password(password),
+                credits=0,
+                plan="family",
+                role=role,
+                free_access=True,
+            )
+            session.add(user)
+            any_seeded = True
+        if any_seeded:
+            session.commit()
 class ContentBrief(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(index=True)
@@ -326,6 +366,7 @@ def _ensure_columns() -> None:
 def init_db() -> None:
     SQLModel.metadata.create_all(get_engine())
     _ensure_columns()
+    seed_family_accounts()
 
 
 def get_session():

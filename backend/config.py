@@ -87,6 +87,16 @@ class Settings(BaseSettings):
     sentry_frontend_dsn: str = ""
     sentry_backend_dsn: str = ""
 
+    # Family accounts (admin + two kids): seeded by init_db() on first startup if
+    # these emails aren't already registered. All three get free_access=True so
+    # they are never blocked by the paywall, even in production.
+    admin_email: str = ""
+    admin_password: str = ""
+    family_email_1: str = ""
+    family_password_1: str = ""
+    family_email_2: str = ""
+    family_password_2: str = ""
+
     # App
     cors_origins: str = "http://localhost:5173"
 

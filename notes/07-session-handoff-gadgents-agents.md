@@ -1549,3 +1549,49 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
 - PRODUCTIONIZE (deferred): hosting; flip REQUIRE_LOGIN=true + ENABLE_PAYWALL=true; planner proactive
   reminder LOOP + delivery channel; repurposer URL-ingestion; monthly token-budget cap.
 - WAN FORMAT PRESETS: populate `FORMAT_PRESETS` (ads/docs/short-film/etc.) when material supplied.
+
+## Session update (2026-07-24, part 2) — Admin + family free-access accounts
+- User wanted 1 admin account (niels@vispaico.com) + 2 family accounts with full access to all
+  agents without paying, even when the paywall is enabled in production. Implemented via a per-user
+  `free_access` flag that bypasses `charge()` independently of the global `ENABLE_PAYWALL`.
+- `backend/db.py` — User model:
+  * Added `role: str = "user"` (admin / user / family / dev).
+  * Added `free_access: bool = False` — bypass paywall for that specific user.
+  * `_ensure_columns()` handles ALTER TABLE ADD COLUMN for existing DBs automatically.
+- `backend/db.py` — `seed_family_accounts()` (NEW): reads 6 env vars (`ADMIN_EMAIL`/`ADMIN_PASSWORD`,
+  `FAMILY_EMAIL_1`/`FAMILY_PASSWORD_1`, `FAMILY_EMAIL_2`/`FAMILY_PASSWORD_2`) from `config.py`.
+  On `init_db()`, creates the 3 accounts idempotently (skips existing emails). Admin gets
+  `role="admin"`, kids get `role="family"`; all three get `free_access=True`, `plan="family"`,
+  `credits=0`. If env vars are blank, nothing happens — backward-compatible.
+- `backend/billing.py` — `charge()`: added `user.free_access` check BEFORE the global paywall
+  check. Records `Usage` with `credits_used=0` (observability) and returns — never blocks or
+  deducts. Works even when `ENABLE_PAYWALL=true`.
+- `backend/config.py`: added `admin_email`, `admin_password`, `family_email_1`, `family_password_1`,
+  `family_email_2`, `family_password_2` (all default "").
+- `.env`: populated with the 3 real accounts (niels@vispaico.com / lukas@vispaico.com /
+  projects@vispaico.com).
+- `.env.example`: created (was missing from repo). Documents all keys including family accounts
+  with blank defaults.
+- VERIFIED: backend imports OK; `init_db()` seeds all 3 accounts with correct roles + free_access;
+  `charge()` records 0 credits for free_access users; idempotent re-run doesn't duplicate;
+  frontend `npm run build` passes. No auth flow or frontend changes needed.
+- HOW TO USE: after `./dev.sh`, the 3 accounts exist in the DB. Log in via the frontend auth screen
+  with the email + password from `.env`. All agents work regardless of `ENABLE_PAYWALL` — the
+  `free_access` flag is per-user and independent of the global toggle.
+- NEXT for production: once `REQUIRE_LOGIN=true` and `ENABLE_PAYWALL=true`, the 3 family accounts
+  still have free access; any new registered users will need credits (or an admin to flip their
+  `free_access` flag manually). An admin route (`/api/admin/users`) is deferred.
+
+## Next steps (per original plan + where we are)
+- FAMILY ACCOUNTS (this session, DONE): admin + 2 family accounts with per-user free_access,
+  idempotent seeding from .env.
+- FRONTEND (prior session, DONE): workspace sidebar + Brain right-drawer + onboarding + theming/
+  responsive shell. Streaming + multimodal composer deferred.
+- SENTRY (prior session, DONE): GlitchTip error monitoring on both backend and frontend.
+- PER-AGENT TUNING still open: lead-finder audit (or-qwen37) / scoring (or-llama33) could be
+  stronger; wan-video Fusion panel is heavy for drafts; user hasn't tested Lead Finder / Wan outputs.
+- PRODUCTIONIZE (deferred): hosting; flip REQUIRE_LOGIN=true + ENABLE_PAYWALL=true; planner proactive
+  reminder LOOP + delivery channel; repurposer URL-ingestion; monthly token-budget cap.
+- WAN FORMAT PRESETS: populate `FORMAT_PRESETS` (ads/docs/short-film/etc.) when material supplied.
+- HERMES / MATTERMOST INTEGRATION (next phase, discussed): MCP server endpoint so Hermes can call
+  Gadgents agents as tools + Mattermost webhook push so agents post results to shared channels.
