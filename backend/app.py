@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 
+import sentry_sdk
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -14,6 +15,14 @@ from backend.routes.wan import close_wan_llm
 from backend.db import Session, get_engine
 
 _settings = get_settings()
+
+if _settings.sentry_backend_dsn:
+    sentry_sdk.init(
+        dsn=_settings.sentry_backend_dsn,
+        enable_tracing=True,
+        traces_sample_rate=1.0,
+        environment="production" if _settings.require_login else "development",
+    )
 
 
 @asynccontextmanager
@@ -62,4 +71,5 @@ def app_config():
         "require_login": _settings.require_login,
         "enable_paywall": _settings.enable_paywall,
         "providers": _settings.llm_provider_order,
+        "sentry_dsn": _settings.sentry_frontend_dsn or None,
     }

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { api, getToken, setToken, getMode, setMode } from "./api.js";
+import { initSentry } from "./sentry.js";
 
 const ALL_PLATFORMS = ["Instagram", "TikTok", "LinkedIn", "X", "YouTube", "Facebook"];
 
@@ -27,6 +28,7 @@ export function App() {
     api
       .config()
       .then((cfg) => {
+        initSentry(cfg.sentry_dsn);
         setRequireLogin(!!cfg.require_login);
         if (!cfg.require_login) {
           // Dev-bypass: no account needed. Use a synthetic user so credits

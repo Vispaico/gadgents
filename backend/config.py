@@ -82,6 +82,11 @@ class Settings(BaseSettings):
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
 
+    # Error monitoring (Sentry / GlitchTip). Leave blank to skip initialization.
+    # Separate DSNs for frontend (React) and backend (FastAPI).
+    sentry_frontend_dsn: str = ""
+    sentry_backend_dsn: str = ""
+
     # App
     cors_origins: str = "http://localhost:5173"
 

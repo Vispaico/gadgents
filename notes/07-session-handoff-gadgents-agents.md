@@ -1511,9 +1511,39 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
   and the unified multimodal composer (text + drag-drop file/image/audio/video; needs upload
   endpoints + preprocessing). Both are backend-bearing; revisit when ready.
 
+## Session update (2026-07-24) — Sentry / GlitchTip error monitoring wired (backend + frontend)
+- User deployed GlitchTip on their server and provided two project DSNs (Gadgents Frontend project 4,
+  Gadgents Backend project 5). Installed and configured Sentry SDKs on both sides.
+- BACKEND:
+  * `backend/config.py`: added `sentry_frontend_dsn` + `sentry_backend_dsn` fields (blank defaults,
+    populated from `.env` `SENTRY_FRONTEND_DSN` / `SENTRY_BACKEND_DSN`).
+  * `backend/app.py`: `sentry_sdk.init()` at module level (only if DSN is set), with `enable_tracing=
+    True`, `traces_sample_rate=1.0`, and `environment` derived from `require_login` (production vs
+    development). `/api/config` now also exposes `sentry_dsn` (the frontend DSN) so the React app
+    can init Sentry without hardcoding a key in the client bundle.
+  * `sentry-sdk[fastapi]>=2.0` added to `pyproject.toml`, installed in `.venv` (v2.66.1).
+- FRONTEND:
+  * Installed `@sentry/react` + `@sentry/vite-plugin`.
+  * `frontend/src/sentry.js` (NEW): deferred `initSentry(dsn)` helper — calls `Sentry.init()` with
+    browser tracing + replay integrations (traces 1.0, replays session 0.1, replays on error 1.0).
+    Only inits once; no-ops if DSN is empty.
+  * `frontend/src/main.jsx`: replaced the custom `ErrorBoundary` class with `Sentry.ErrorBoundary`
+    (same fallback UI — dark panel with error stack). Reports crashes to Sentry automatically.
+  * `frontend/src/App.jsx`: imports `initSentry` and calls it with `cfg.sentry_dsn` immediately
+    after the `/api/config` fetch (the existing `useEffect` startup path).
+  * `frontend/vite.config.js`: added `sentryVitePlugin` (org "sentry", project "gadgents-frontend")
+    + `build.sourcemap: true` for production source map uploads. `authToken` is blank (optional;
+    only needed for CI source-map uploads; error capture works without it).
+- `.env` / `.env.example`: both now have `SENTRY_FRONTEND_DSN` / `SENTRY_BACKEND_DSN` keys. The
+  dev `.env` carries the real GlitchTip DSNs.
+- VERIFIED: backend imports OK (DSNs resolve from `.env`); `TestClient` `/api/config` returns
+  `sentry_dsn`; frontend `npm run build` passes (383 modules, sourcemaps emitted).
+
 ## Next steps (per original plan + where we are)
 - FRONTEND (this session, DONE): workspace sidebar + Brain right-drawer + onboarding + theming/
   responsive shell. Streaming + multimodal composer deferred.
+- SENTRY (this session, DONE): GlitchTip error monitoring on both backend (FastAPI) and frontend
+  (React). Source map upload auth token deferred (not needed for error capture).
 - PER-AGENT TUNING still open: lead-finder audit (or-qwen37) / scoring (or-llama33) could be
   stronger; wan-video Fusion panel is heavy for drafts; user hasn't tested Lead Finder / Wan outputs.
 - PRODUCTIONIZE (deferred): hosting; flip REQUIRE_LOGIN=true + ENABLE_PAYWALL=true; planner proactive
