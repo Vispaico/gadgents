@@ -19,10 +19,37 @@ export function App() {
   const [view, setView] = useState(getToken() ? "home" : "auth");
   const [requireLogin, setRequireLogin] = useState(true);
   const [user, setUser] = useState(null);
+  const [emailVerified, setEmailVerified] = useState(false);
+  const [verificationMsg, setVerificationMsg] = useState("");
+  const [resetToken, setResetToken] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
+    // Handle ?verify=<token> and ?reset=<token> from email links.
+    const params = new URLSearchParams(window.location.search);
+    const verifyToken = params.get("verify");
+    const resetToken = params.get("reset");
+
+    if (verifyToken) {
+      setView("verify");
+      setBusy(true);
+      api.verifyEmail(verifyToken)
+        .then((r) => { setError(""); setVerificationMsg(r.message); })
+        .catch((err) => { setVerificationMsg(err.message); setError(err.message); })
+        .finally(() => setBusy(false));
+      if (window.history.replaceState) {
+        window.history.replaceState({}, "", "/");
+      }
+      return;
+    }
+
+    if (resetToken) {
+      setView("reset");
+      setResetToken(resetToken);
+      return;
+    }
+
     // Learn whether the backend is in dev-bypass mode (REQUIRE_LOGIN=false).
     // If not required, skip the login screen entirely and go straight to home.
     api
@@ -34,9 +61,10 @@ export function App() {
           // Dev-bypass: no account needed. Use a synthetic user so credits
           // display and handler assignments don't crash.
           setUser({ email: "", credits: 0, plan: "dev" });
+          setEmailVerified(true);
           setView("home");
         } else if (getToken()) {
-          return api.me().then(setUser).catch(() => setToken(""));
+          return api.me().then((u) => { setUser(u); setEmailVerified(true); }).catch(() => setToken(""));
         }
       })
       .catch(() => setRequireLogin(true));
@@ -45,13 +73,62 @@ export function App() {
   function applyAuth(res) {
     setToken(res.access_token);
     setUser({ email: res.email || "", credits: res.credits, plan: res.plan });
-    setView("home");
+    setEmailVerified(res.email_verified || false);
+    if (res.email_verified) {
+      setView("home");
+    } else {
+      setView("verify-gate");
+    }
   }
 
   async function refreshMe() {
     try {
       setUser(await api.me());
     } catch {}
+  }
+
+  if (view === "verify") {
+    return <VerificationResult msg={verificationMsg} busy={busy} error={!!error} />;
+  }
+
+  if (view === "verify-gate") {
+    return (
+      <VerificationGate
+        onResend={async () => {
+          setBusy(true);
+          try {
+            const r = await api.resendVerification();
+            setError("");
+            setVerificationMsg(r.message);
+          } catch (err) {
+            setError(err.message);
+          } finally {
+            setBusy(false);
+          }
+        }}
+        onRefresh={async () => {
+          try {
+            const u = await api.authMe();
+            if (u.email_verified) {
+              setEmailVerified(true);
+              setView("home");
+            } else {
+              setError("Email not verified yet. Check your inbox.");
+            }
+          } catch (err) {
+            // If get_current_user returned 403, user is still unverified.
+            setError(err.message);
+          }
+        }}
+        busy={busy}
+        msg={verificationMsg}
+        error={error}
+      />
+    );
+  }
+
+  if (view === "reset") {
+    return <ResetPasswordScreen token={resetToken} />;
   }
 
   if (view === "auth") {
@@ -109,6 +186,31 @@ function AuthScreen({ error, setError, onLogin, onRegister, busy }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [mode, setMode] = useState("login");
+  const [forgotSent, setForgotSent] = useState(false);
+
+  async function handleForgot() {
+    if (!email) { setError("Enter your email first."); return; }
+    setError("");
+    try {
+      const r = await api.forgotPassword(email);
+      setForgotSent(true);
+      setError("");
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  if (forgotSent) {
+    return (
+      <Center>
+        <Card>
+          <h1>Check your inbox</h1>
+          <p className="muted">If that email is registered, we've sent a reset link.</p>
+          <button className="link" onClick={() => setForgotSent(false)}>Back to login</button>
+        </Card>
+      </Center>
+    );
+  }
 
   return (
     <Center>
@@ -128,6 +230,111 @@ function AuthScreen({ error, setError, onLogin, onRegister, busy }) {
         </button>
         <button className="link" onClick={() => { setMode(mode === "login" ? "register" : "login"); setError(""); }}>
           {mode === "login" ? "Need an account? Sign up" : "Have an account? Log in"}
+        </button>
+        {mode === "login" && (
+          <button className="link" onClick={handleForgot} style={{ fontSize: "0.85em", opacity: 0.7 }}>
+            Forgot password?
+          </button>
+        )}
+      </Card>
+    </Center>
+  );
+}
+
+
+function VerificationResult({ msg, busy, error }) {
+  return (
+    <Center>
+      <Card>
+        {busy ? (
+          <h2>Verifying your email…</h2>
+        ) : error ? (
+          <>
+            <h2 style={{ color: "#ff6b6b" }}>Verification failed</h2>
+            <p className="muted">{msg}</p>
+          </>
+        ) : (
+          <>
+            <h2 style={{ color: "#51cf66" }}>Email verified!</h2>
+            <p className="muted">{msg}</p>
+          </>
+        )}
+        <button onClick={() => { window.location.href = "/"; }}>Go to login</button>
+      </Card>
+    </Center>
+  );
+}
+
+
+function VerificationGate({ onResend, onRefresh, busy, msg, error }) {
+  return (
+    <Center>
+      <Card>
+        <h2>Check your inbox</h2>
+        <p className="muted">
+          We sent a verification link to your email. Click it to activate your account
+          and start using all agents.
+        </p>
+        {msg && !error && <div className="success">{msg}</div>}
+        {error && <div className="error">{error}</div>}
+        <button disabled={busy} onClick={onResend}>
+          {busy ? "Sending…" : "Resend verification email"}
+        </button>
+        <button disabled={busy} className="link" onClick={onRefresh}>
+          I've verified my email — refresh
+        </button>
+      </Card>
+    </Center>
+  );
+}
+
+
+function ResetPasswordScreen({ token }) {
+  const [password, setPassword] = useState("");
+  const [msg, setMsg] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  async function handleReset() {
+    if (password.length < 6) { setError("Password must be at least 6 characters."); return; }
+    setBusy(true);
+    try {
+      const r = await api.resetPassword(token, password);
+      setDone(true);
+      setMsg(r.message);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (done) {
+    return (
+      <Center>
+        <Card>
+          <h2 style={{ color: "#51cf66" }}>Password reset!</h2>
+          <p className="muted">{msg}</p>
+          <button onClick={() => { window.location.href = "/"; }}>Go to login</button>
+        </Card>
+      </Center>
+    );
+  }
+
+  return (
+    <Center>
+      <Card>
+        <h2>Choose a new password</h2>
+        {error && <div className="error">{error}</div>}
+        <input
+          type="password"
+          placeholder="New password (min 6 characters)"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+        <button disabled={busy} onClick={handleReset}>
+          {busy ? "Resetting…" : "Reset password"}
         </button>
       </Card>
     </Center>

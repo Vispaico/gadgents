@@ -12,6 +12,8 @@ class User(SQLModel, table=True):
     plan: str = Field(default="free")  # free | hourly | monthly
     role: str = Field(default="user")  # admin | user | family | dev
     free_access: bool = Field(default=False)  # bypass paywall regardless of global flag
+    email_verified: bool = Field(default=False)
+    verification_token: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     is_active: bool = Field(default=True)
 
@@ -219,6 +221,7 @@ def seed_family_accounts() -> None:
                 plan="family",
                 role=role,
                 free_access=True,
+                email_verified=True,
             )
             session.add(user)
             any_seeded = True

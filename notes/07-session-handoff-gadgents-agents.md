@@ -1595,3 +1595,58 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
 - WAN FORMAT PRESETS: populate `FORMAT_PRESETS` (ads/docs/short-film/etc.) when material supplied.
 - HERMES / MATTERMOST INTEGRATION (next phase, discussed): MCP server endpoint so Hermes can call
   Gadgents agents as tools + Mattermost webhook push so agents post results to shared channels.
+
+## Session update (2026-07-24, part 3) — Email SMTP + verification + password reset
+- User had Hostinger SMTP settings already in `.env`. Built full email verification + password reset
+  flow using stdlib `smtplib` (zero new dependencies).
+- `backend/config.py`: added `smtp_host`, `smtp_port` (default 465), `smtp_user`, `smtp_pass`,
+  `contact_email`. Values from `.env`: smtp.hostinger.com, support@vispaico.com.
+- `backend/email.py` (NEW): `send_email(to, subject, body)` via `smtplib.SMTP_SSL` (Hostinger uses
+  port 465 SSL). Graceful no-op when `smtp_host` is blank (dev mode). `send_verification_email()`
+  and `send_password_reset_email()` helpers with link-embedding.
+- `backend/db.py` — User model: added `email_verified: bool = False` and
+  `verification_token: Optional[str] = None`. `_ensure_columns()` handles existing DBs.
+  `seed_family_accounts()` sets `email_verified=True` for the 3 family accounts (they skip
+  the verify gate).
+- `backend/routes/auth.py` — new/modified endpoints:
+  * `POST /api/auth/register`: generates UUID4 verification token, sends email (fire-and-forget
+    via ThreadPoolExecutor, doesn't block registration), returns `email_verified: false`.
+  * `POST /api/auth/login`: now returns `email_verified` in TokenOut.
+  * `POST /api/auth/verify/{token}`: sets email_verified=True, clears token. 404 on invalid.
+  * `POST /api/auth/resend-verification`: re-sends verification email (auth required).
+  * `POST /api/auth/forgot-password`: always returns 200 (no email leak). Sets verification_token
+    and sends reset email if email exists.
+  * `POST /api/auth/reset-password`: verifies token, sets new password, clears token, also marks
+    email_verified=True (implicit verification — you proved you own the inbox).
+  * `GET /api/auth/me`: returns full profile (email, credits, plan, email_verified, role).
+- HARD BLOCK: `backend/auth.py` `get_current_user` now raises 403 "Email not verified. Please check
+  your inbox." when `REQUIRE_LOGIN=true` and user's `email_verified` is false. In dev-bypass
+  mode (`REQUIRE_LOGIN=false`) the check is skipped — all agents work without verification.
+- FRONTEND:
+  * `api.js`: added `authMe`, `verifyEmail`, `resendVerification`, `forgotPassword`, `resetPassword`.
+  * `AuthScreen`: added "Forgot password?" link that shows a confirmation screen after sending.
+  * `VerificationGate` (NEW): shown after register/login when email is unverified. "Check your inbox"
+    prompt with "Resend verification email" and "I've verified — refresh" buttons.
+  * `VerificationResult` (NEW): handles `?verify=<token>` from email links. Shows success/failure
+    then links to login.
+  * `ResetPasswordScreen` (NEW): handles `?reset=<token>`. Form for new password, shows success.
+  * `App.jsx`: tracks `emailVerified`, `verificationMsg`, `resetToken` state. On startup, if URL has
+    `?verify=` or `?reset=`, renders the corresponding flow. On login/register, if `email_verified`
+    is false, shows the `verify-gate` instead of Home.
+- VERIFIED: backend imports OK; 15 TestClient tests pass (register, login, verify, /me unverified
+  [skipped in dev mode], forgot, reset, login-new-pass, resend, nonexistent-forgot, bad-token,
+  bad-verify, dup-register); frontend `npm run build` passes. SMTP is wired but untested live
+  (the sendEmail call is fire-and-forget, doesn't block the request).
+- HOW TO TEST EMAIL: `./dev.sh`, register a new non-family account, and check the email inbox
+  (SMTP is live with smtp.hostinger.com). If email doesn't arrive, check spam folder — Hostinger
+  sometimes limits port 465 from non-webmail IPs; try port 587 (STARTTLS) in `.env` SMTP_PORT.
+
+## Next steps (per original plan + where we are)
+- EMAIL + VERIFICATION (this session, DONE): SMTP sending, email verification with hard block,
+  password reset, forgot-password, frontend flows. Test live with `./dev.sh`.
+- FAMILY ACCOUNTS (prior session, DONE).
+- FRONTEND (prior session, DONE): workspace sidebar + Brain right-drawer.
+- SENTRY (prior session, DONE): GlitchTip on backend + frontend.
+- PER-AGENT TUNING still open.
+- PRODUCTIONIZE (deferred): hosting, Dockerfile, Postgres, Stripe, REQUIRE_LOGIN flip.
+- HERMES / MATTERMOST (next phase, discussed).

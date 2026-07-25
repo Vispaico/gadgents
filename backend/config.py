@@ -97,6 +97,15 @@ class Settings(BaseSettings):
     family_email_2: str = ""
     family_password_2: str = ""
 
+    # Email (Hostinger SMTP). Used for verification, password reset, and future
+    # transactional email (invoices, billing, newsletter). Leave host blank to
+    # skip sending (dev mode — no-ops gracefully).
+    smtp_host: str = ""
+    smtp_port: int = 465
+    smtp_user: str = ""
+    smtp_pass: str = ""
+    contact_email: str = ""
+
     # App
     cors_origins: str = "http://localhost:5173"
 

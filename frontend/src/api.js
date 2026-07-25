@@ -74,4 +74,9 @@ export const api = {
     req("POST", "/wan/run", { source_image, concept, format_kind, title }),
   wanBriefs: () => req("GET", "/wan/briefs"),
   config: () => req("GET", "/config"),
+  verifyEmail: (token) => req("POST", `/auth/verify/${token}`),
+  resendVerification: () => req("POST", "/auth/resend-verification"),
+  forgotPassword: (email) => req("POST", "/auth/forgot-password", { email }),
+  resetPassword: (token, password) => req("POST", "/auth/reset-password", { token, password }),
+  authMe: () => req("GET", "/auth/me"),
 };
