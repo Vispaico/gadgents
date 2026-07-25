@@ -79,4 +79,7 @@ export const api = {
   forgotPassword: (email) => req("POST", "/auth/forgot-password", { email }),
   resetPassword: (token, password) => req("POST", "/auth/reset-password", { token, password }),
   authMe: () => req("GET", "/auth/me"),
+  apiKeys: () => req("GET", "/apikeys"),
+  apiKeyCreate: (label) => req("POST", "/apikeys", { label }),
+  apiKeyDelete: (id) => req("DELETE", `/apikeys/${id}`),
 };

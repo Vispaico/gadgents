@@ -106,6 +106,10 @@ class Settings(BaseSettings):
     smtp_pass: str = ""
     contact_email: str = ""
 
+    # MCP server port (Hermes agent integration). Default 8100 so it runs alongside
+    # the main FastAPI (:8000) without any port conflict. Separate from app.py's uvicorn.
+    mcp_port: int = 8100
+
     # App
     cors_origins: str = "http://localhost:5173"
 

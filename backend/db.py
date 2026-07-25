@@ -1,3 +1,5 @@
+import hashlib
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -16,6 +18,29 @@ class User(SQLModel, table=True):
     verification_token: Optional[str] = Field(default=None)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     is_active: bool = Field(default=True)
+
+
+class ApiKey(SQLModel, table=True):
+    """Long-lived API key for Hermes agents / MCP clients to call Gadgents agents."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True, foreign_key="user.id")
+    key_hash: str = Field(unique=True, index=True)
+    label: str = ""
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+def create_api_key(user_id: int, label: str) -> "tuple[str, ApiKey]":
+    """Generate a raw API key, hash it, persist the row. Returns (raw_key, ApiKey)."""
+    raw = "gadgents_" + os.urandom(32).hex()
+    key_hash = hashlib.sha256(raw.encode()).hexdigest()
+    return raw, ApiKey(user_id=user_id, key_hash=key_hash, label=label)
+
+
+def lookup_api_key(api_key: str) -> Optional[ApiKey]:
+    """Find an ApiKey row by raw key string. Returns None if not found."""
+    key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+    with Session(get_engine()) as session:
+        return session.exec(select(ApiKey).where(ApiKey.key_hash == key_hash)).first()
 
 
 class Usage(SQLModel, table=True):

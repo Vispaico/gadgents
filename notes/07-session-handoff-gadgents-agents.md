@@ -1650,3 +1650,78 @@ each session boundary (append to "Recent changes" and refresh the bugs/next-step
 - PER-AGENT TUNING still open.
 - PRODUCTIONIZE (deferred): hosting, Dockerfile, Postgres, Stripe, REQUIRE_LOGIN flip.
 - HERMES / MATTERMOST (next phase, discussed).
+
+## Session update (2026-07-25) — Hermes MCP integration (API keys + MCP server)
+- Built the full Hermes agent integration: Gadgents now exposes ALL 7 agents + 4 composite
+  workflows as MCP tools via a JSON-RPC 2.0 server on port 8100. Hermes agents in Mattermost
+  connect with a long-lived API key (Bearer auth) and call Gadgents agents as their tool arsenal.
+  Direction: Hermes → Gadgents. No Mattermost webhook push needed (Hermes already chats in
+  Mattermost; they pull Gadgents tools via MCP). Multiple Hermes profiles can each have their
+  own API key, all mapped to the same admin/family user accounts.
+- ARCHITECTURE:
+  * `backend/db.py`: new `ApiKey` model (user_id FK, sha256-hashed key, label, created_at).
+    `create_api_key(user_id, label)` returns (raw_key, ApiKey row); `lookup_api_key(raw)`
+    resolves a key string to the ApiKey row. Caller must `session.add()` + commit the row.
+  * `backend/auth.py`: new `authenticate_api_key(raw_key)` — resolves Bearer token to the
+    owning User (or None). Uses its own DB session; no FastAPI Depends dependency. API keys
+    bypass email-verification checks (machine-to-machine, not human login).
+  * `backend/config.py`: added `mcp_port: int = 8100` (overrideable via `.env` `MCP_PORT`).
+  * `backend/routes/apikeys.py` (NEW): `POST /api/apikeys` (create, returns key once with
+    "store securely" note), `GET /api/apikeys` (list with truncated hash, no secrets),
+    `DELETE /api/apikeys/{id}` (own-keys only). Auth required (JWT). Registered in `app.py`.
+  * `backend/mcp_server.py` (NEW): standalone FastAPI app on `:8100` exposing the MCP
+    Streamable HTTP protocol. 11 tools: `gadgents_prompt_engineer`, `_content_producer`,
+    `_coder`, `_personal_planner`, `_content_studio` (full 2-stage pipeline), `_content_repurpose`
+    (Fusion), `_lead_finder` (ICP -> discovery chain), `_wan_video` (storyboard), `_social_listen`
+    (CloakBrowser X/LinkedIn), `_brain_query` (OpenKB wiki search), `_brain_save` (index into wiki).
+    Each tool maps its Hermes-friendly args to the internal agent/pipeline calls and runs
+    `charge()` through the mapped user. MCP protocol: `POST /mcp` (JSON-RPC 2.0: initialize,
+    tools/list, tools/call), `GET /mcp` (SSE endpoint), `DELETE /mcp` (teardown). Brain
+    tools call openkb subprocess directly (no need for the brain route layer; same logic).
+  * `backend/app.py`: `lifespan` now starts `mcp_server.start_mcp_server()` in a daemon
+    thread. MCP port is configurable via `MCP_PORT` in `.env` (reverts to 8000 if not set).
+    does NOT conflict with the main :8000 API.
+  * `.env.example`: added `MCP_PORT` key.
+- FRONTEND:
+  * `frontend/src/api.js`: added `apiKeys()`, `apiKeyCreate(label)`, `apiKeyDelete(id)`.
+  * `frontend/src/App.jsx`: new "API Keys" sidebar nav item (`id="apikeys"`, 🔑 icon),
+    new `<ApiKeys>` component with create form (label input + Create button), key display
+    (green box with full key, "store securely" once note), list of existing keys (label +
+    truncated hash prefix + delete button), and a "How to use" code block showing the exact
+    MCP JSON-RPC call format (HTTP POST to :8100/mcp with Bearer auth). Key management
+    works identically with JWT (same user flow as Billing/profile).
+- VERIFIED: backend py_compile OK; frontend `npm run build` passes (383 modules); 7-agent
+  registry unchanged; `create_api_key` -> `authenticate_api_key` roundtrip works (key found,
+  user resolved); TestClient `/api/apikeys` CRUD: create (200 with raw key), list (200 with
+  truncated hash), delete (200); MCP TestClient: `/health` returns 11 tools, `initialize`
+  (protocol version + capabilities), `tools/list` (all 11 tools with inputSchema), `tools/call`
+  without auth returns -32001 "Unauthorized", `notifications/initialized` accepted cleanly;
+  model catalog all present; no stale editorial or Anthropic references.
+- HOW TO USE:
+  1. In the Gadgents UI, go to "API Keys" tab, create a key (label = Hermes agent name).
+  2. Copy the key (shown once). Configure the Hermes agent's MCP client with:
+     - Endpoint: `https://your-server:8100/mcp` (or `http://localhost:8100/mcp` in dev)
+     - Auth: `Authorization: Bearer <gadgents_...raw_key...>`
+  3. The Hermes agent initializes, discovers the 11 tools via `tools/list`, and calls them.
+     Credits/Paywall/free_access are handled transparently through the mapped user account.
+     In dev-bypass mode (REQUIRE_LOGIN=false), any valid API key works.
+- MCP_PORT=8100 is the default; override in `.env` if that port is taken. The MCP server
+  runs as a daemon thread inside the main uvicorn process (started by `./dev.sh`). It does
+  NOT use `--reload` and does not restart on file changes (the daemon thread approach is
+  stable for a separate HTTP app within the same PID). To kill it independently: the MCP
+  server has no standalone shutdown; it dies with the main process.
+- DEFERRED: the Mattermost webhook push direction (Gadgents → Mattermost) was discussed but
+  the user confirmed no Mattermost connection is needed — Hermes agents pull Gadgents tools,
+  not the other way around. This is purely a Hermes→Gadgents integration via MCP.
+- NOTE: the user asked to ALWAYS update this 07 handoff at each boundary so the next chat
+  picks up seamlessly. This 2026-07-25 update is that update.
+
+## Next steps (per original plan + where we are)
+- HERMES MCP INTEGRATION (this session, DONE): API keys, MCP JSON-RPC server on :8100 exposing
+  all 7 agents + 4 composite workflows as MCP tools, frontend API key management UI.
+- FRONTEND (prior session, DONE): workspace sidebar + Brain right-drawer + Sentry + email.
+- PER-AGENT TUNING still open: lead-finder audit/scoring could be stronger; wan-video Fusion
+  panel is heavy for drafts. **USER INTENDS TO FOCUS NEXT ON OPTIMISING AGENT MODEL CHOICES**
+  (not on the Hermes integration).
+- PRODUCTIONIZE (deferred): hosting, Dockerfile, Postgres, Stripe, REQUIRE_LOGIN flip.
+- WAN FORMAT PRESETS: populate `FORMAT_PRESETS` (ads/docs/short-film/etc.) when material supplied.

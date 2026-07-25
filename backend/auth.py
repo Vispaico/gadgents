@@ -8,7 +8,7 @@ from jose import JWTError, jwt
 from sqlmodel import Session
 
 from backend.config import get_settings
-from backend.db import User, get_session, get_user
+from backend.db import User, get_session, get_user, lookup_api_key
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
@@ -53,3 +53,18 @@ async def get_current_user(
     if _settings.require_login and not user.email_verified:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Email not verified. Please check your inbox.")
     return user
+
+
+def authenticate_api_key(raw_key: str) -> Optional[User]:
+    """Resolve a raw API key string to a User, or return None.
+
+    Used by the MCP server and any future programmatic (non-browser) callers.
+    API keys bypass email-verification checks — they represent long-lived
+    machine-to-machine identity, not a human login flow.
+    """
+    row = lookup_api_key(raw_key)
+    if row is None:
+        return None
+    from backend.db import get_engine as _get_engine
+    with Session(_get_engine()) as session:
+        return get_user(session, row.user_id)

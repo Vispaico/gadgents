@@ -12,6 +12,7 @@ const NAV_ITEMS = [
   { id: "social", label: "Social Listen", icon: "📡" },
   { id: "leads", label: "Lead Finder", icon: "🎯" },
   { id: "wan", label: "Wan Video", icon: "🎬" },
+  { id: "apikeys", label: "API Keys", icon: "🔑" },
   { id: "billing", label: "Billing", icon: "💳" },
 ];
 
@@ -411,6 +412,7 @@ function Home({ user, setError, onBought, onLogout }) {
             />
           )}
           {tab === "wan" && <WanVideo user={user} setError={setError} seed={wanSeed} />}
+          {tab === "apikeys" && <ApiKeys user={user} setError={setError} />}
           {tab === "billing" && <Billing onBought={onBought} />}
         </main>
       </div>
@@ -996,6 +998,117 @@ function AssetEditor({ asset, onSave }) {
         </div>
       ))}
       <button onClick={save}>Save asset</button>
+    </div>
+  );
+}
+
+function ApiKeys({ user, setError }) {
+  const [keys, setKeys] = useState([]);
+  const [newLabel, setNewLabel] = useState("");
+  const [generated, setGenerated] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  useEffect(() => {
+    api.apiKeys().then(setKeys).catch(() => {});
+  }, []);
+
+  async function createKey() {
+    setBusy(true);
+    setErr("");
+    setGenerated(null);
+    try {
+      const res = await api.apiKeyCreate(newLabel || "Hermes agent");
+      setGenerated(res);
+      api.apiKeys().then(setKeys).catch(() => {});
+      setNewLabel("");
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeKey(id) {
+    try {
+      await api.apiKeyDelete(id);
+      setKeys((cur) => cur.filter((k) => k.id !== id));
+    } catch (e) {
+      setErr(e.message);
+    }
+  }
+
+  return (
+    <div className="studio">
+      <h2>API Keys</h2>
+      <p className="muted">
+        Create long-lived API keys for Hermes agents or other MCP clients to call Gadgents
+        agents programmatically. Each key maps to your account — credits and access are handled
+        the same as when you use the apps interface. Keys are shown <strong>once</strong> at
+        creation; store them securely.
+      </p>
+
+      <div className="composer" style={{ marginTop: 16 }}>
+        <input
+          value={newLabel}
+          placeholder="Label (e.g. 'Hermes — Nieli')"
+          onChange={(e) => setNewLabel(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && create()}
+        />
+        <button disabled={busy} onClick={create}>
+          {busy ? "…" : "Create API key"}
+        </button>
+      </div>
+      {err && <div className="error">{err}</div>}
+
+      {generated && (
+        <div className="result" style={{ borderColor: "#7ee787" }}>
+          <h3 style={{ color: "#7ee787" }}>Key created — copy it now</h3>
+          <pre style={{ background: "#161b22", padding: 12, borderRadius: 6, wordBreak: "break-all" }}>
+            {generated.api_key}
+          </pre>
+          <p className="muted">{generated.note}</p>
+        </div>
+      )}
+
+      {keys.length > 0 && (
+        <div className="result">
+          <h3>Your API keys</h3>
+          <div className="grid">
+            {keys.map((k) => (
+              <div key={k.id} className="card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <strong>{k.label}</strong>
+                  <p className="muted">{k.key_hash_truncated} · {k.created_at}</p>
+                </div>
+                <button className="link" onClick={() => removeKey(k.id)}>✕</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="result" style={{ marginTop: 24 }}>
+        <h3>How to use</h3>
+        <pre style={{ whiteSpace: "pre-wrap", fontSize: "0.85em" }}>{`# MCP endpoint (JSON-RPC 2.0 over HTTP)
+POST http://localhost:8100/mcp
+Authorization: Bearer <your-api-key>
+
+# Initialize
+{"jsonrpc": "2.0", "method": "initialize", "params": {
+  "protocolVersion": "2024-11-05",
+  "capabilities": {}
+}, "id": 1}
+
+# List available tools
+{"jsonrpc": "2.0", "method": "tools/list", "params": {}, "id": 2}
+
+# Call a tool (example: content studio)
+{"jsonrpc": "2.0", "method": "tools/call", "params": {
+  "name": "gadgents_content_studio",
+  "arguments": {"material": "Your article text...", "platforms": ["LinkedIn", "X"]}
+}, "id": 3}`}</pre>
+      </div>
     </div>
   );
 }
