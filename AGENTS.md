@@ -38,6 +38,17 @@
 - Stripe is stubbed: set `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` and finish
   `backend/routes/billing.py:stripe_webhook` to go live.
 
+
+## Must Observe Rules
+- Do not preserve backward compatibility.
+- Choose the simplest implementation that fully meets the current requirements.
+- Prefer established, well-maintained libraries over custom implementations.
+- Avoid premature abstraction: prefer simple concrete solutions until real patterns emerge.
+- Prefer composition over centralization: use small focused modules with explicit interfaces instead of centralized systems.
+- Keep responsibilities clear: keep modules focused and avoid mixing transport, orchestration, domain/workflow state, persistence, infrastructure.
+- Never skip verification: do not bypass required checks, tests, or quality gates.
+
+
 ## No tests, no lint, no CI
 This repo has no test infrastructure, no lint/formatter config, no typecheck setup, and
 no CI workflows. Commands like `pytest`, `ruff`, `mypy` are not configured.
