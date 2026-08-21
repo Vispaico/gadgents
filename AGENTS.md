@@ -1,6 +1,7 @@
 # Gadgents v2
 
 ## Run
+
 - `./dev.sh` — starts backend (:8000) + frontend (:5173); Ctrl+C stops both.
   - **Do NOT add `--reload` to uvicorn.** The editorial pipeline runs as a background
     thread; `--reload` kills in-flight runs on any file change, leaving orphaned state.
@@ -9,6 +10,7 @@
   an account or credits. `.env.example` shows current defaults as true.
 
 ## Architecture
+
 - **Backend**: FastAPI + SQLModel, entrypoint `backend.app:app`. No external agent
   framework — custom LLM client with per-model health-aware fallback.
 - **Frontend**: React + Vite, proxies `/api` to `localhost:8000`.
@@ -25,6 +27,7 @@
   cool down other models on the same gateway.
 
 ## Key quirks
+
 - LLM POST runs out-of-process via `subprocess -m backend._llm_post_child` because httpx
   timeouts and signals fail to interrupt a stalled recv on macOS. Do NOT refactor to
   in-process httpx calls for the main completion path.
@@ -38,8 +41,8 @@
 - Stripe is stubbed: set `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` and finish
   `backend/routes/billing.py:stripe_webhook` to go live.
 
-
 ## Must Observe Rules
+
 - Do not preserve backward compatibility.
 - Choose the simplest implementation that fully meets the current requirements.
 - Prefer established, well-maintained libraries over custom implementations.
@@ -48,7 +51,18 @@
 - Keep responsibilities clear: keep modules focused and avoid mixing transport, orchestration, domain/workflow state, persistence, infrastructure.
 - Never skip verification: do not bypass required checks, tests, or quality gates.
 
-
 ## No tests, no lint, no CI
+
 This repo has no test infrastructure, no lint/formatter config, no typecheck setup, and
 no CI workflows. Commands like `pytest`, `ruff`, `mypy` are not configured.
+
+## NVIDIA API Rate Limiting Rule
+
+When using NVIDIA API models:
+
+- Limit requests to maximum 36 per minute
+- Wait 1.7 seconds between requests (60/36 = ~1.67s)
+- If you receive a 429 error, wait 5 seconds before retrying
+- Log all rate limit waits to the console
+
+This ensures continuous usage without hitting the 40 RPM limit.
